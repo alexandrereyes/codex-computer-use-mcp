@@ -68,6 +68,25 @@ Running the package binary starts a stdio MCP server with the same ten methods a
 npx codex-computer-use-mcp
 ```
 
+Example OpenCode V2 configuration:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "codex-computer-use": {
+        "type": "local",
+        "command": ["codex-computer-use-mcp"]
+      }
+    }
+  }
+}
+```
+
+This fork has been verified with the ChatGPT-bundled Codex `0.154.0-alpha.6.2`.
+Use `CODEX_COMPUTER_USE_CODEX_PATH` only when the installed ChatGPT component
+requires a different compatible OpenAI-signed Codex binary.
+
 Example Pi MCP configuration:
 
 ```json

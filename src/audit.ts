@@ -17,6 +17,8 @@ export interface AuditRecord {
 	modelTurnsStarted: number;
 	ephemeralThread: boolean | null;
 	elicitationRequests: number;
+	// Retained-session calls record false: outcome=ok confirms the tool, not relock.
+	// Session close (or the one-shot wrapper) is the cleanup boundary.
 	brokerCleanupVerified: boolean;
 	resultContentTypes: string[];
 	resultBytes: number;

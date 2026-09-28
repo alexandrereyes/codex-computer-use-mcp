@@ -121,6 +121,91 @@ test("one broker session preserves the official active-app lease across inspecti
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("sequence retains protection, skips inventory, reacquires after idle and confirms final cleanup", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "native-broker-lifecycle."));
+	try {
+		const { script, log } = await makeFake(root);
+		let acquired = 0, finished = 0, begun = 0, idle = 0;
+		let expired = false;
+		const toolCalls = async () => (await readFile(log, "utf8")).split("\n").filter((line) => line && JSON.parse(line).method === "mcpServer/tool/call").length;
+		const session = await createOfficialDirectToolSession({
+			...options(script),
+			nativeLeaseFactory: async () => {
+				acquired += 1;
+				return {
+					begin: async () => { if (expired) { expired = false; return false; } begun++; return true; },
+					idle: async () => { idle++; assert.equal(await toolCalls(), begun + 1); },
+					finish: async () => { finished++; },
+				};
+			},
+		});
+		try {
+			assert.equal((await session.call("list_apps", {})).isError, false);
+			assert.equal(acquired, 0);
+			for (let i = 0; i < 5; i++) {
+				const result = await session.call("get_app_state", { app: "com.apple.finder" });
+				assert.equal(result.brokerCleanupVerified, false);
+			}
+			assert.equal(acquired, 1); assert.equal(finished, 0); assert.equal(idle, 5);
+			expired = true;
+			await session.call("press_key", { app: "com.apple.finder", key: "Escape" });
+			assert.equal(acquired, 2); assert.equal(finished, 1);
+		} finally { await session.close(); }
+		assert.equal(finished, 2);
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("one-shot native cleanup failure remains unconfirmed; input abort and active cancellation release protection", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "native-final-cleanup."));
+	try {
+		const { script } = await makeFake(root);
+		await assert.rejects(callOfficialDirectTool("get_app_state", { app: "Finder" }, {
+			...options(script), nativeLeaseFactory: async () => ({ begin: async () => true, idle: async () => {},
+				finish: async () => { throw new Error("relock failed"); } }),
+		}), (error: Error) => error instanceof DirectBrokerCallError && !error.cleanupVerified);
+		for (const cause of ["input", "idle-input", "cancel", "timeout"]) {
+			let abort!: (error: Error) => void;
+			let started!: () => void;
+			const active = new Promise<void>(resolve => { started = resolve; });
+			let finished = 0;
+			const session = await createOfficialDirectToolSession({ ...options(script, cause === "idle-input" ? "ok" : "hang"),
+				nativeLeaseFactory: async onAbort => {
+					abort = onAbort;
+					return { begin: async () => { started(); return true; }, idle: async () => {}, finish: async () => { finished++; } };
+				},
+			});
+			const controller = new AbortController();
+			const result = session.call("get_app_state", { app: "Finder" }, { signal: controller.signal, timeoutMs: cause === "timeout" ? 20 : 1000 });
+			const rejected = cause === "idle-input" ? result : assert.rejects(result);
+			await active;
+			if (cause === "idle-input") { await result; abort(new Error("local input between calls")); }
+			if (cause === "input") abort(new Error("local input"));
+			if (cause === "cancel") controller.abort();
+			await rejected;
+			await assert.rejects(session.close());
+			assert.equal(finished, 1);
+		}
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("official error releases retained protection before returning the error result", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "native-official-error."));
+	try {
+		const { script } = await makeFake(root);
+		let finished = 0;
+		const session = await createOfficialDirectToolSession({ ...options(script, "lease"),
+			nativeLeaseFactory: async () => ({ begin: async () => true,
+				idle: async () => assert.fail("official error must release, not retain"),
+				finish: async () => { finished++; } }),
+		});
+		try {
+			assert.equal((await session.call("press_key", { app: "Finder", key: "Escape" })).isError, true);
+			assert.equal(finished, 1);
+		} finally { await session.close(); }
+		assert.equal(finished, 1);
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("one-shot wrapper preserves a setup-phase cleanup failure", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "direct-broker-setup-cleanup-test."));
 	try {

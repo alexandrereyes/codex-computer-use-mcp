@@ -7,8 +7,10 @@ import { createInterface } from "node:readline";
 import { z } from "zod";
 import type { DirectMethod, DirectToolArguments, JsonObject, JsonValue } from "./tools.ts";
 import { PACKAGE_VERSION } from "./version.ts";
+import { acquireNativeLease, type NativeLease } from "./native-lease.ts";
 
-const DEFAULT_CODEX_PATH = "/Applications/ChatGPT.app/Contents/Resources/codex";
+const DEFAULT_CODEX_PATH = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex";
+const LEGACY_CODEX_PATH = "/Applications/ChatGPT.app/Contents/Resources/codex";
 const CODEX_PATH_ENV = "CODEX_COMPUTER_USE_CODEX_PATH";
 const COMPUTER_USE_PLUGIN_ROOT =
 	"/Applications/ChatGPT.app/Contents/Resources/plugins/openai-bundled/plugins/computer-use";
@@ -75,6 +77,8 @@ export interface DirectBrokerOptions {
 	skipSignatureVerification?: boolean;
 	/** Test-only process-enumerator override. */
 	processEnumeratorCommand?: string;
+	/** Test-only lifecycle transport injection; not exposed by MCP. */
+	nativeLeaseFactory?: typeof acquireNativeLease;
 	onSpawn?: (pid: number) => void;
 }
 
@@ -156,6 +160,8 @@ interface ResolveOfficialComputerUseClientOptions {
 
 interface ResolveOfficialCodexAppServerOptions {
 	codexPath?: string;
+	/** Test-only app bundle root override. */
+	resourcesPath?: string;
 	runSync?: RunSync;
 }
 
@@ -195,12 +201,15 @@ export function resolveOfficialComputerUseClient(options: ResolveOfficialCompute
 
 export function resolveOfficialCodexAppServer(options: ResolveOfficialCodexAppServerOptions = {}) {
 	const runSync = options.runSync ?? productionRunSync;
-	const requestedPath = options.codexPath ?? process.env[CODEX_PATH_ENV] ?? DEFAULT_CODEX_PATH;
+	const currentPath = options.resourcesPath === undefined ? DEFAULT_CODEX_PATH : path.join(options.resourcesPath, "codex-cli/CodexCLI.app/Contents/MacOS/codex");
+	const legacyPath = options.resourcesPath === undefined ? LEGACY_CODEX_PATH : path.join(options.resourcesPath, "codex");
+	// Only absence permits fallback: a present but invalid current binary must fail verification.
+	const requestedPath = options.codexPath ?? process.env[CODEX_PATH_ENV] ?? (existsSync(currentPath) ? currentPath : legacyPath);
 	let codexPath: string;
 	try {
 		codexPath = realpathSync(requestedPath);
 	} catch {
-		throw new BrokerVerificationError("Official Codex app-server was not found");
+		throw new BrokerVerificationError(`Official Codex app-server was not found at ${requestedPath}; checked current/legacy app layouts unless ${CODEX_PATH_ENV} or an explicit path was provided`);
 	}
 	if (codexPath !== path.resolve(requestedPath)) {
 		throw new BrokerVerificationError("Official Codex app-server path was not canonical");
@@ -216,7 +225,7 @@ export function resolveOfficialCodexAppServer(options: ResolveOfficialCodexAppSe
 
 export function verifyOfficialDirectBroker(options: ResolveOfficialComputerUseClientOptions & ResolveOfficialCodexAppServerOptions = {}) {
 	const runSync = options.runSync ?? productionRunSync;
-	const appServer = resolveOfficialCodexAppServer({ codexPath: options.codexPath, runSync });
+	const appServer = resolveOfficialCodexAppServer({ codexPath: options.codexPath, resourcesPath: options.resourcesPath, runSync });
 	const client = resolveOfficialComputerUseClient({ ...options, runSync });
 	const build = runSync("/usr/bin/plutil", ["-extract", "CFBundleVersion", "raw", path.join(client.appPath, "Contents", "Info.plist")]);
 	const clientBuild = (build.stdout ?? "").trim();
@@ -476,6 +485,17 @@ export async function createOfficialDirectToolSession(
 	let closed = false;
 	let closePromise: Promise<void> | undefined;
 	let callActive = false;
+	let nativeLease: NativeLease | undefined;
+	let nativeCleanup: Promise<void> | undefined;
+	const finishNative = async (): Promise<void> => {
+		if (nativeLease) {
+			const lease = nativeLease;
+			nativeLease = undefined;
+			nativeCleanup = lease.finish();
+		}
+		await nativeCleanup;
+		nativeCleanup = undefined;
+	};
 	let currentElicitation: DirectBrokerOptions["onElicitation"];
 	let currentElicitationCount = 0;
 	const pending = new Map<string, { resolve(value: JsonValue): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
@@ -494,6 +514,7 @@ export async function createOfficialDirectToolSession(
 		fatalError ??= error;
 		rejectAll(fatalError);
 		void ensureTerminated().catch(() => undefined);
+		void finishNative().catch(() => undefined); // EOF revokes even when failure happens between calls.
 	};
 	const send = (message: JsonValue): void => {
 		if (!proc?.stdin.writable) throw new Error("Official app-server stdin is unavailable");
@@ -536,6 +557,8 @@ export async function createOfficialDirectToolSession(
 			} catch (error) {
 				cleanupError = error instanceof Error ? error : new Error(String(error));
 			}
+			try { await finishNative(); }
+			catch (error) { cleanupError = error instanceof Error ? error : new Error(String(error)); }
 			if (cleanupError) throw new Error("Official direct Computer Use broker cleanup failed", { cause: cleanupError });
 			if (fatalError || modelTurnsStarted !== 0) throw fatalError ?? new BrokerVerificationError("Model-turn activity was observed during broker teardown");
 		})();
@@ -639,6 +662,7 @@ export async function createOfficialDirectToolSession(
 			currentElicitationCount = 0;
 			let directCalls = 0;
 			let abortHandler: (() => void) | undefined;
+			let nativeCall = false;
 			try {
 				if (callOptions.signal) {
 					abortHandler = () => fail(new Error("Direct Computer Use request cancelled"));
@@ -646,10 +670,29 @@ export async function createOfficialDirectToolSession(
 					else callOptions.signal.addEventListener("abort", abortHandler, { once: true });
 				}
 				if (fatalError) throw fatalError;
+				if (method !== "list_apps" && (options.nativeLeaseFactory || !options.skipSignatureVerification)) {
+					await nativeCleanup;
+					// Normal native idle cleanup leaves the official session and its element IDs intact.
+					if (nativeLease && !await nativeLease.begin()) await finishNative();
+					else if (nativeLease) nativeCall = true;
+					if (!nativeLease) {
+						if (closed || fatalError) throw fatalError ?? new Error("Official session closed");
+						nativeLease = await (options.nativeLeaseFactory ?? acquireNativeLease)(fail, callOptions.signal);
+						if (nativeLease) {
+							if (!await nativeLease.begin()) throw new Error("Native lease expired before first call");
+							nativeCall = true;
+						}
+					}
+				}
+				if (closed) throw new Error("Official session closed");
+				if (fatalError) throw fatalError;
 				const raw = await request("mcpServer/tool/call", { threadId, server: "computer-use", tool: method, arguments: args }, callOptions.timeoutMs ?? 120_000);
 				directCalls = 1;
 				if (modelTurnsStarted !== 0) throw new BrokerVerificationError("Model-turn activity was observed during direct dispatch");
 				const result = directResultSchema.parse(raw);
+				if (result.isError) await finishNative();
+				else if (nativeCall) await nativeLease?.idle();
+				if (fatalError) throw fatalError;
 				return {
 					content: result.content,
 					structuredContent: result.structuredContent,
@@ -662,7 +705,12 @@ export async function createOfficialDirectToolSession(
 					brokerCleanupVerified: false,
 				};
 			} catch (error) {
-				const primary = normalizeBrokerError(error instanceof Error ? error : new Error(String(error)), stderr);
+				let primary = normalizeBrokerError(error instanceof Error ? error : new Error(String(error)), stderr);
+				try { await finishNative(); }
+				catch (nativeError) {
+					primary = nativeError instanceof Error ? nativeError : new Error(String(nativeError));
+					fail(primary);
+				}
 				throw new DirectBrokerCallError(primary.message, false, primary, {
 					directCalls, modelTurnsStarted, ephemeralThread, elicitationRequests: currentElicitationCount,
 					brokerVersion: verification.brokerVersion, clientBuild: verification.clientBuild,

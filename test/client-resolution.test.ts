@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { resolveOfficialCodexAppServer, resolveOfficialComputerUseClient } from "../src/direct-broker.ts";
+import { getDirectStatus } from "../src/direct-service.ts";
 
 const CLIENT_RELATIVE_PATH = "Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient";
 
@@ -21,6 +22,38 @@ function signedBy(team = "2DC432GLL2") {
 		return { status: 0, stdout: "", stderr: `TeamIdentifier=${team}\n` };
 	};
 }
+
+test("discovers the current app layout, falls back only on absence, and fails closed on invalid signatures", async () => {
+	const root = realpathSync(await mkdtemp(path.join(os.tmpdir(), "codex-layouts.")));
+	const previousPath = process.env.CODEX_COMPUTER_USE_CODEX_PATH;
+	delete process.env.CODEX_COMPUTER_USE_CODEX_PATH;
+	try {
+		const current = path.join(root, "codex-cli/CodexCLI.app/Contents/MacOS/codex");
+		const legacy = path.join(root, "codex");
+		await mkdir(path.dirname(current), { recursive: true });
+		await writeFile(current, "fixture");
+		await writeFile(legacy, "fixture");
+		const runSync = (command: string, args: string[]) => args[0] === "--version"
+			? { status: 0, stdout: "codex-cli 0.158.0-alpha.2.1" }
+			: signedBy()(command, args);
+		assert.equal(resolveOfficialCodexAppServer({ resourcesPath: root, runSync }).codexPath, current);
+		assert.throws(() => resolveOfficialCodexAppServer({ resourcesPath: root, runSync: () => ({ status: 1 }) }), /Signature verification failed/);
+		process.env.CODEX_COMPUTER_USE_CODEX_PATH = path.join(root, "missing-override");
+		assert.throws(() => resolveOfficialCodexAppServer({ resourcesPath: root, runSync }), /missing-override/);
+		const status = getDirectStatus(root);
+		assert.equal(status.brokerVerified, false);
+		assert.match(status.verificationError!, /missing-override/);
+		delete process.env.CODEX_COMPUTER_USE_CODEX_PATH;
+		await rm(current);
+		assert.equal(resolveOfficialCodexAppServer({ resourcesPath: root, runSync }).codexPath, legacy);
+		await rm(legacy);
+		assert.throws(() => resolveOfficialCodexAppServer({ resourcesPath: root, runSync }), /was not found at/);
+	} finally {
+		if (previousPath === undefined) delete process.env.CODEX_COMPUTER_USE_CODEX_PATH;
+		else process.env.CODEX_COMPUTER_USE_CODEX_PATH = previousPath;
+		await rm(root, { recursive: true, force: true });
+	}
+});
 
 test("resolves a compatible Codex app-server from the environment after signature verification", async () => {
 	const tempRoot = await mkdtemp(path.join(os.tmpdir(), "codex-app-server-resolution."));

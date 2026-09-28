@@ -14,6 +14,8 @@ OpenAI does not produce or endorse this independent project. It relies on an exp
 
 macOS Screen Recording, Accessibility and TCC controls still apply.
 
+The broker is discovered at `ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`, with fallback to `Contents/Resources/codex` only when the current layout is absent. A configured override takes precedence; failed verification never falls back to another binary. `computer_use_status` reports `brokerPath` on successful verification or `verificationError` on failure.
+
 If the Codex binary bundled with ChatGPT is temporarily incompatible with the installed Computer Use component, set `CODEX_COMPUTER_USE_CODEX_PATH` to the canonical path of a compatible native Codex binary from an official OpenAI installation:
 
 ```bash
@@ -21,6 +23,14 @@ export CODEX_COMPUTER_USE_CODEX_PATH=/absolute/path/to/codex
 ```
 
 The adapter verifies the selected binary's code signature and OpenAI Team ID before use. It rejects unsigned binaries, binaries signed by another team and symlinked paths.
+
+### Optional native macOS locked-use complement
+
+Native integration is disabled by default. Explicit `CODEX_COMPUTER_USE_NATIVE_LOCK=1` requires the manually installed MacLock helper at `/Library/Application Support/MacLock/MacLock.app`; a missing helper is an error, not a silent fallback. Source, installer, contracts and instructions are included in [`macos/`](macos/README.md). There is no automatic/root install hook and no redistributed OpenAI binary. The ordinary unlocked-session requirement above remains the default.
+
+The continuous-protection version retains one curtain across nearby calls in the official session: at most 120 seconds per active call, then 30 seconds idle, enforced natively and renewed only by real call transitions, without heartbeats. Session close, errors, cancellation or local input revoke protection; normal idle cleanup permits a fresh lease on the next call without discarding the official session. `list_apps` and status do not acquire/renew protection. A successful retained call does not imply relock; `brokerCleanupVerified` remains false until session cleanup. Other clients receive BUSY while the single global guard is held.
+
+The continuous version passed a supervised seven-call Finder sequence on 2026-09-28 in **8.647 seconds**: verified Help-menu preparation/actions, one native protection cycle, zero model turns and final relock/cleanup. It is active in the local deployment; the user's visual impression has not yet been recorded. The installed runtime was verified against checkout hashes. The current local Cancel-based acceptance driver is newer than the installed tarball and must be included in a future requested repack. This work remains on local branch `locked-use`, without commit/push/publication. Details and the earlier per-call baseline are in `macos/README.md`. There is no LaunchAgent or OpenCode core change. Private macOS SPI compatibility is host-specific. A cleanup error does not imply an official action was rolled back; never automatically repeat a mutation.
 
 ## Pi
 

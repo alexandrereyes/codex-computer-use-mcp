@@ -24,7 +24,11 @@ test("packed package installs and starts from a plain npm consumer", async () =>
 		const sourceRoot = path.join(root, "source");
 		await cp(projectRoot, sourceRoot, {
 			recursive: true,
-			filter: (entry) => ![".git", "dist", "node_modules"].includes(path.relative(projectRoot, entry).split(path.sep)[0]),
+			filter: (entry) => {
+				const relative = path.relative(projectRoot, entry);
+				return ![".git", "dist", "node_modules"].includes(relative.split(path.sep)[0]) &&
+					!relative.startsWith(`macos${path.sep}build`) && !relative.split(path.sep).includes("__pycache__");
+			},
 		});
 		await symlink(path.join(projectRoot, "node_modules"), path.join(sourceRoot, "node_modules"), "dir");
 		const { stdout } = await execFileAsync("npm", ["pack", "--json", "--pack-destination", root], { cwd: sourceRoot });
@@ -39,10 +43,17 @@ test("packed package installs and starts from a plain npm consumer", async () =>
 			"dist/version.js",
 			"integrations/pi/index.ts",
 			"package.json",
+			"macos/README.md",
+			"macos/Makefile",
+			"macos/installer_support.py",
+			"macos/native/Native.m",
+			"macos/native/install-native.py",
+			"macos/native/SkyLightWindow-LICENSE.txt",
 		]) assert.ok(files.includes(required), required);
 		for (const excluded of ["package-lock.json", "src/version.ts", "test/package.test.ts", "tsconfig.json"]) {
 			assert.equal(files.includes(excluded), false, excluded);
 		}
+		assert.ok(files.every(file => !file.startsWith("macos/build/") && !file.includes("__pycache__") && !/\.(?:log|png|jpg|jpeg|jsonl)$/.test(file)));
 
 		const consumer = path.join(root, "consumer");
 		await mkdir(consumer);
@@ -58,6 +69,9 @@ test("packed package installs and starts from a plain npm consumer", async () =>
 
 		const status = await execFileAsync(process.execPath, [path.join(installedRoot, "dist", "mcp-server.js"), "--status"]);
 		assert.equal(JSON.parse(status.stdout).permissionMode, "no-permissions");
+		// The optional native complement must build/test from the installed tarball
+		// without the historical mac-lock checkout. Fixtures only, no GUI or root.
+		await execFileAsync("make", ["-C", path.join(installedRoot, "macos"), "test-native"], { timeout: 60_000 });
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}

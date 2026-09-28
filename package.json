@@ -31,6 +31,17 @@
     "integrations/pi/index.ts",
     "README.md",
     "SECURITY.md",
+    "macos/README.md",
+    "macos/opencode-mcp.example.json",
+    "macos/Makefile",
+    "macos/installer_support.py",
+    "macos/native/*.m",
+    "macos/native/*.c",
+    "macos/native/*.h",
+    "macos/native/*.py",
+    "macos/native/*.plist",
+    "macos/native/SkyLightWindow-LICENSE.txt",
+    "macos/native/*.mjs",
     "LICENSE"
   ],
   "scripts": {

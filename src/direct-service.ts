@@ -156,6 +156,8 @@ interface DirectStatus extends JsonObject {
 	permissionMode: "no-permissions";
 	brokerVerified: boolean;
 	brokerVersion?: string;
+	brokerPath?: string;
+	verificationError?: string;
 	clientBuild?: string;
 	methods: DirectMethod[];
 }
@@ -171,7 +173,10 @@ export function getDirectStatus(stateRoot = defaultStateRoot()): DirectStatus {
 		const verification = verifyOfficialDirectBroker();
 		status.brokerVerified = true;
 		status.brokerVersion = verification.brokerVersion;
+		status.brokerPath = verification.codexPath;
 		status.clientBuild = verification.clientBuild;
-	} catch {}
+	} catch (error) {
+		status.verificationError = error instanceof Error ? error.message : String(error);
+	}
 	return status;
 }

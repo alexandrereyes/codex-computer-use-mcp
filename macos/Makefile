@@ -8,11 +8,11 @@ PLUGIN = build/MacLockAuthorization.bundle
 
 native: $(APP)/Contents/MacOS/mac-lock $(PLUGIN)/Contents/MacOS/MacLockAuthorization
 
-$(APP)/Contents/MacOS/mac-lock: native/Native.m native/Startup.m native/Startup.h $(CORE) $(HEADERS) native/App-Info.plist native/SkyLightWindow-LICENSE.txt
+$(APP)/Contents/MacOS/mac-lock: native/Native.m native/Startup.m native/Startup.h native/DisplayWake.m native/DisplayWake.h $(CORE) $(HEADERS) native/App-Info.plist native/SkyLightWindow-LICENSE.txt
 	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	cp native/App-Info.plist $(APP)/Contents/Info.plist
 	cp native/SkyLightWindow-LICENSE.txt $(APP)/Contents/Resources/
-	xcrun clang $(FLAGS) native/Native.m native/Startup.m $(CORE) -o $@
+	xcrun clang $(FLAGS) native/Native.m native/Startup.m native/DisplayWake.m $(CORE) -o $@
 	codesign --force --sign "$(SIGN_IDENTITY)" --options runtime --timestamp=none $(APP)
 	codesign --verify --strict $(APP)
 
@@ -70,7 +70,11 @@ build/startup-fixture: native/startup-fixture.m native/Startup.m native/Startup.
 	xcrun clang $(FLAGS) native/startup-fixture.m native/Startup.m native/Runtime.m -o $@
 	codesign --force --sign - --identifier br.com.alexandrem.mac-lock.startup-fixture $@
 
-test-native: native build/controller-contract build/attempt-contract build/plugin-contract build/authorization-contract build/lock-state-contract build/source-contract build/login-ui-contract build/window-space-contract build/startup-fixture
+build/display-wake-contract: native/DisplayWake.m native/DisplayWake.h native/Runtime.h native/Controller.h native/test-display-wake.m
+	mkdir -p build
+	xcrun clang $(FLAGS) -DIOPMAssertionCreateWithName=fixture_create -DIOPMAssertionDeclareUserActivity=fixture_activity -DIOPMAssertionRelease=fixture_release -Dusleep=fixture_sleep native/DisplayWake.m native/test-display-wake.m -o $@
+
+test-native: native build/controller-contract build/attempt-contract build/plugin-contract build/authorization-contract build/lock-state-contract build/source-contract build/login-ui-contract build/window-space-contract build/startup-fixture build/display-wake-contract
 	./build/controller-contract
 	./build/attempt-contract
 	./build/plugin-contract $(PLUGIN)/Contents/MacOS/MacLockAuthorization operation
@@ -79,4 +83,5 @@ test-native: native build/controller-contract build/attempt-contract build/plugi
 	./build/source-contract
 	./build/login-ui-contract
 	./build/window-space-contract
+	./build/display-wake-contract
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s native -p 'test_*.py' -v

@@ -103,7 +103,8 @@ export async function acquireNativeLease(
 		})();
 		return finishPromise;
 	};
-	const timer = setTimeout(() => fail("Native Computer Use guard readiness timed out"), 12_000);
+	// Includes coordinator startup (3 s), display wake (3 s), and existing guard/unlock (8 s).
+	const timer = setTimeout(() => fail("Native Computer Use guard readiness timed out"), 15_000);
 	try {
 		await started;
 		return {

@@ -1,6 +1,7 @@
 #import "Runtime.h"
 #include <assert.h>
 #include <string.h>
+#include <notify.h>
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
@@ -10,6 +11,18 @@ int main(int argc, const char *argv[]) {
             printf("sessionAvailable=%d flagPresent=%d flag=%s lockState=%ld (-1=unknown,0=unlocked,1=locked)\n",
                 session != nil, flag != nil, flag ? [[flag description] UTF8String] : "absent",
                 (long)MLSessionLockState(session));
+            int token; uint64_t ui = 0;
+            uint32_t status = notify_register_check("com.apple.sessionagent.screenLockUIIsShowing", &token);
+            if (status == NOTIFY_STATUS_OK) { status = notify_get_state(token, &ui); notify_cancel(token); }
+            CGDirectDisplayID displays[16]; uint32_t count = 0;
+            BOOL queryOK = CGGetOnlineDisplayList(16, displays, &count) == kCGErrorSuccess && count > 0;
+            BOOL asleep = queryOK, awake = queryOK;
+            for (uint32_t i = 0; queryOK && i < count; ++i) {
+                asleep &= CGDisplayIsAsleep(displays[i]) != 0;
+                awake &= CGDisplayIsAsleep(displays[i]) == 0;
+            }
+            printf("loginUIQueryOK=%d loginUI=%llu graphicalSession=%d displayQueryOK=%d displays=%u allDisplaysAsleep=%d allDisplaysAwake=%d\n",
+                status == NOTIFY_STATUS_OK, (unsigned long long)ui, MLGraphicalSessionActive(), queryOK, count, asleep, awake);
             return 0;
         }
         if (argc != 1) return 2;

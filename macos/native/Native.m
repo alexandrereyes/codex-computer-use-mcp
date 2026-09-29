@@ -1,5 +1,6 @@
 #import "Shield.h"
 #import "Startup.h"
+#import "DisplayWake.h"
 #include "Attempt.h"
 #include <signal.h>
 #include <sys/socket.h>
@@ -77,11 +78,11 @@ static void suppress(void) { [@"until-manual-unlock" writeToFile:suppressionPath
                     MLPostReturn(login);
                 }
                 else [self stop:@"could-not-arm" failure:YES];
-            } else if (MLMonotonicTime() - self->_started > 3) [self stop:@"guard-readiness-timeout" failure:YES];
+            } else if (MLMonotonicTime() - self->_started > 6) [self stop:@"guard-readiness-timeout" failure:YES];
             return;
         }
-        if (!self->_readySent && MLMonotonicTime() - self->_started >= 8) { [self stop:@"unlock-or-visible-coverage-timeout" failure:YES]; return; }
-        if (MLBeginRunning(&self->_attempt, MLMonotonicTime(), self->_started + 8, MLLeaseActive(&self->_lease),
+        if (!self->_readySent && MLMonotonicTime() - self->_started >= 11) { [self stop:@"unlock-or-visible-coverage-timeout" failure:YES]; return; }
+        if (MLBeginRunning(&self->_attempt, MLMonotonicTime(), self->_started + 11, MLLeaseActive(&self->_lease),
             self->_grantReported, MLScreenLockState() == MLLockUnlocked, self->_guardianVisible)) {
             fprintf(stderr, "MacLock grant reported; unlock and Guardian visible coverage confirmed\n");
             self->_readySent = YES;
@@ -224,9 +225,9 @@ static void suppress(void) { [@"until-manual-unlock" writeToFile:suppressionPath
 - (BOOL)pause { _disabled = YES; return _client < 0; }
 @end
 
-static void retireGuardian(MLShield *shield) {
-    if ([shield removeAfterConfirmedLock]) exit(0);
-    [shield relockThen:^{ retireGuardian(shield); }];
+static void retireGuardian(MLShield *shield, IOPMAssertionID display) {
+    if ([shield removeAfterConfirmedLock]) { MLReleaseDisplay(&display); exit(0); }
+    [shield relockThen:^{ retireGuardian(shield, display); }];
 }
 static int guardianMain(void) {
     if (isatty(STDIN_FILENO) || MLScreenLockState() != MLLockLocked) return 2;
@@ -236,16 +237,22 @@ static int guardianMain(void) {
     if (!trustedParent) return 3;
     // Survive termination of the coordinator's process group.
     if (setsid() < 0 && getpgrp() == getpgid(getppid())) return 3;
+    IOPMAssertionID display;
+    NSString *wakeFailure = MLPrepareLockedDisplay(STDIN_FILENO, &display);
+    if (wakeFailure) { MLWriteLine(STDOUT_FILENO, [@"FAILED " stringByAppendingString:wakeFailure]); return 3; }
     MLShield *shield = [MLShield new]; shield.companion = getppid();
     shield.usesPrivateSpace = YES;
     __block BOOL stopping = NO;
     void (^stop)(NSString *) = ^(NSString *reason) {
         if (stopping) return; stopping = YES;
         if (reason) { suppress(); MLWriteLine(STDOUT_FILENO, [@"ABORT " stringByAppendingString:reason]); }
-        [shield relockThen:^{ retireGuardian(shield); }];
+        [shield relockThen:^{ retireGuardian(shield, display); }];
     };
     shield.onAbort = stop;
-    if (![shield start]) { MLWriteLine(STDOUT_FILENO, [@"FAILED " stringByAppendingString:shield.failureReason]); return 3; }
+    if (![shield start]) {
+        MLWriteLine(STDOUT_FILENO, [@"FAILED " stringByAppendingString:shield.failureReason]);
+        [shield cancelBeforeGrant]; MLReleaseDisplay(&display); return 3;
+    }
     __block BOOL announced = NO, visibleAnnounced = NO;
     double started = MLMonotonicTime();
     [NSTimer scheduledTimerWithTimeInterval:0.05 repeats:YES block:^(NSTimer *timer) {
@@ -281,7 +288,7 @@ static int guardianMain(void) {
         }
         dispatch_async(dispatch_get_main_queue(), ^{ stop(@"coordinator-lost"); });
     });
-    [NSApp run]; return 0;
+    [NSApp run]; MLReleaseDisplay(&display); return 0;
 }
 static int clientMain(NSDictionary *config, BOOL autoStart) {
     SecRequirementRef requirement = MLCopyNativeRequirement();
@@ -305,7 +312,7 @@ static int clientMain(NSDictionary *config, BOOL autoStart) {
     BOOL valid = fd >= 0 && requirement && MLPeerMatches(fd, requirement);
     if (requirement) CFRelease(requirement);
     if (!valid) { if (fd >= 0) close(fd); MLWriteLine(STDOUT_FILENO, @"FAILED COORDINATOR_UNAVAILABLE"); return 3; }
-    struct timeval timeout = {.tv_sec = 12}; setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    struct timeval timeout = {.tv_sec = 15}; setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     if (!MLWriteLine(fd, @"SEQUENCE")) { close(fd); return 4; }
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         char byte;

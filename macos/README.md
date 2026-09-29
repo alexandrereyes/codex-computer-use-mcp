@@ -15,7 +15,7 @@ relock. Persistent native installation and the versioned proxy are now active.
 The user's visual impression of the transitions has not yet been confirmed; the
 result below records tool, state and native lifecycle evidence.
 
-The complement is maintained in this fork on branch `locked-use`. Git publication
+The complement is maintained in this fork on branch `main`. Git publication
 and deployment of an installed runtime tarball are separate operations.
 
 - The native coordinator acknowledges `B` at each real call start: **120 seconds
@@ -43,6 +43,122 @@ and deployment of an installed runtime tarball are separate operations.
 The new protocol uses `SEQUENCE` / `READY_SEQUENCE`, with acknowledged call boundaries.
 Upgrade both native and proxy together; mixed versions fail instead of dispatching
 under an unacknowledged protection contract.
+
+## Display asleep + locked — accepted and active (2026-09-29)
+
+The regular-use failure `FAILED login-surface-not-observable` occurred before Space
+creation: the session was locked and active, but display sleep hid the login UI.
+It was not a Safari permission failure. The failure observed on 2026-09-28 at 20:21
+was corrected and qualified on this host on 2026-09-29. The fix is now **installed
+and active**, on top of continuous baseline `ef965bc29d47a0d879663068d42bab71e7112166`.
+The display-wake fix is included alongside continuous protection in this fork's `main`.
+
+### Real Safari acceptance and deployment
+
+Private report: `macos/build/e2e-display-wake-2026-09-29T13-51-08-046Z.json`.
+Start **13:51:08.046 UTC**, finish **13:51:14.805 UTC**, duration **6.759 seconds**.
+
+- Before: locked=1, login UI=0, active graphical session=1, all displays asleep=1.
+  After the user locked, the supervisor issued `pmset displaysleepnow` once and
+  waited for actual off-state confirmation (about 27 seconds after the request).
+  No global sleep timer or power preference was changed.
+- One official Safari `get_app_state`: `isError=false`, zero model turns. During
+  the protected operation, the session was unlocked and all displays were awake.
+  The supervisor checked a useful Safari image rather than a curtain capture;
+  private content is not reproduced here or committed.
+- Final state: locked=1, login UI=1; `accepted=true`, `brokerCleanupVerified=true`,
+  `lifecycleOrdered=true`; exactly one attach, cleanup and power-hold release.
+- Native log order: DISPLAY_WAKE_REQUEST → READY → Space → Allow → visible →
+  Space cleanup → DISPLAY_WAKE_END releaseStatus=0 → CLOSED lockState=1.
+
+The persistent native installation matched the tested build hash. The supervisor
+activated `~/.local/share/mac-lock/proxy/locked-use-wake-20260928/node_modules/codex-computer-use-mcp/dist/mcp-server.js`
+in the same `codex-computer-use` entry in `~/.config/opencode/opencode.json`, retaining
+`CODEX_COMPUTER_USE_NATIVE_LOCK=1`. Previous entry backup:
+`~/.local/share/mac-lock/backups/codex-computer-use-before-wake-20260929-105215.json`
+(mode `0600`). Actual MCP status confirmed `brokerVerified=true`; the observed
+coordinator was PID **99094**, `coordinator-auto`. No backend restart was performed.
+The installation/coordinator remain active; the PID is an observation, not authority.
+
+Installed tarball SHA-256:
+`106de015c045e1ec038e3c828d7fd36a253edef2f28e4134e1e15128d7c08248`.
+Only documentation was updated after this acceptance; no source, tests, build,
+package or production configuration changed in this finalization.
+
+After an authenticated lease and signed parent verification, the Guardian:
+
+1. Acquires `PreventUserIdleDisplaySleep` for its protection lifetime. This prevents
+   idle dimming but cannot wake an already-off display by itself.
+2. If the login UI is hidden, calls public `IOPMAssertionDeclareUserActivity` once,
+   with `kIOPMUserActiveLocal` for visible display activity. No HID/password/click
+   or early authentication event is posted.
+3. Waits up to **3 seconds**, checking cancellation/EOF, active graphical session,
+   known locked state, live Apple-signed loginwindow and observable login UI.
+   API success alone is insufficient. Only then does the unchanged Shield start;
+   Return/Allow still follow confirmed protection.
+4. Releases the activity assertion after preparation. The display hold remains in
+   the single Guardian through calls, retained idle and confirmed relock, then is
+   released after curtain teardown. Preparation/start failures release assertions.
+
+The parent preparation budget is 6 seconds (3 wake + 3 guard), overall unlock/
+coverage 11 seconds (previous 8 + wake), and proxy readiness 15 seconds (including
+coordinator startup). Call 120-second and idle 30-second limits are unchanged.
+No power preference, TCC or lock policy is changed. This covers display sleep in a
+running graphical session, not system sleep, shutdown, headless use or a closed lid.
+The prior uncertain-Allow behavior still retains the Guardian; its display hold
+follows that protective lifetime, without a new watchdog or periodic wake request.
+
+Source: Apple's [IOPMLib.h](https://github.com/apple-oss-distributions/IOKitUser/blob/main/pwr_mgt.subproj/IOPMLib.h),
+also checked in the installed Xcode SDK. It documents display power-on without
+special privileges, idle prevention's no-wake/lid/system-sleep limitations, and
+`IOPMAssertionRelease` for teardown. `Local` selects the visible display required
+by the secure login UI, not remote GPU-only activity.
+
+### Suppression and installation/test reference
+
+Suppression is unchanged: existing `run/suppressed` denies the lease before wake.
+The old marker cannot distinguish display startup failure from physical input;
+never delete it to force an automatic retry. Clear it through the existing manual
+unlock observation or the explicit remove/install upgrade below. Startup failures
+retain the existing suppression policy.
+
+The wake upgrade is complete. For a future reinstall, after IDLE, retain the previous
+tarballs, installed proxies and entry backups. Reference commands from the checkout root:
+
+```sh
+make -C macos native
+sudo python3 macos/native/install-native.py remove
+sudo python3 macos/native/install-native.py install --persistent-locked-use --controller-app "$CONTROLLER_APP"
+npm install --omit=dev --prefix "$HOME/.local/share/mac-lock/proxy/locked-use-wake-20260928" "$PWD/macos/build/locked-use-wake-20260928/codex-computer-use-mcp-0.5.0.tgz"
+```
+
+The supervisor completed activation by switching only the existing MCP script path
+to the wake version, retaining the opt-in. No reinstall or additional test is pending.
+
+The user locks and lets displays **actually turn off**, rather than waiting a fixed
+seven seconds. The read-only preflight must show lock 1, login UI query OK/state 0,
+active graphical session and all displays asleep:
+
+```sh
+./macos/build/lock-state-contract --inspect
+CODEX_COMPUTER_USE_NATIVE_LOCK=1 node macos/native/e2e-display-wake.mjs
+```
+
+Only the supervisor executes this GUI acceptance, from the authorized backend chain.
+It makes one official Finder `get_app_state`, checks protected unlocked/awake state,
+closes the lease and requires final lock/login UI. Native logs must order wake request
+→ locked UI ready → Space → existing Return trigger → Space cleanup → successful
+power-hold release → CLOSED/locked. Private results stay in `macos/build/`. To use
+the original target instead, pass `com.apple.Safari` as the sole argument; it still
+uses Computer Use, not Safari DevTools or another conversation's content.
+
+`test-display-wake.m` mocks all power calls and the clock: readiness, already-visible
+UI, timeout, session/unknown/signature/API failures and channel cancel/EOF with release.
+These tests do not wake a display or authorize anything. The subsequent real
+powerd/Safari acceptance is recorded above and was executed by the supervisor.
+Candidate checks passed: **9 native contract executables, 11 Python tests, 68 proxy
+tests**, package-consumer native build/contracts, check/check:pi/build, three menu
+parser contracts, driver syntax and diff whitespace. These are not a real wake test.
 
 ## Build and isolated verification
 
@@ -80,7 +196,7 @@ Native installation is manual opt-in, in `/Library/Application Support/MacLock`
 and `/Library/Security/SecurityAgentPlugins/MacLockAuthorization.bundle`.
 No LaunchAgent: the authorized backend's descendant starts/reuses the coordinator,
 transferring the same singleton flock through the existing child stdin descriptor.
-The continuous version is already installed and remains active. Commands in this
+The wake-enabled continuous version is installed and remains active. Commands in this
 section are references for a future installation/upgrade, not pending activation steps.
 
 For an upgrade, stop issuing Computer Use calls and allow the current operation to
@@ -101,7 +217,8 @@ and rule, preserving Apple/OpenAI alternatives and later unrelated changes.
 The optional `--experimental-locked-use` instead selects a ten-minute global window.
 
 Install this fork's tarball in a **new versioned directory**, never over the working
-`locked-use-20260928` installation. The completed installation used, from the checkout root:
+`locked-use-20260928` installation. The earlier continuous-only installation used,
+from the checkout root (the current wake package is recorded above):
 
 ```sh
 npm install --omit=dev --prefix "$HOME/.local/share/mac-lock/proxy/locked-use-continuous-20260928" "$PWD/macos/build/locked-use-continuous-20260928/codex-computer-use-mcp-0.5.0.tgz"
@@ -113,7 +230,7 @@ the complement is self-contained and does not depend on the historical checkout.
 It keeps upstream version `0.5.0`; use the versioned directory and tarball checksum
 to distinguish this fork. Registry/global `npx` commands may run a different package.
 
-The supervisor activated the existing `codex-computer-use` entry in
+Historical continuous-only activation on 2026-09-28: the supervisor updated the existing `codex-computer-use` entry in
 `~/.config/opencode/opencode.json`, changing only `command[1]` to
 `~/.local/share/mac-lock/proxy/locked-use-continuous-20260928/node_modules/codex-computer-use-mcp/dist/mcp-server.js`
 (an absolute path in the actual JSON). `CODEX_COMPUTER_USE_NATIVE_LOCK=1` was retained.
@@ -125,7 +242,8 @@ Actual `computer_use_status` confirmed `brokerVerified=true` and the updated pat
 the supervisor observed 30 Location MCP processes using the new package. The native
 coordinator was PID 93888 (`coordinator-auto`), with no Guardian remaining after the
 test. These are deployment observations, not persistent process identities. The
-backend was not restarted; the native installation/coordinator remain active.
+backend was not restarted. This deployment was subsequently superseded by the
+wake-enabled installation and coordinator recorded above.
 
 ## Supervised Finder acceptance — passed for continuous protection
 

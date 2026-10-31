@@ -44,6 +44,17 @@ The new protocol uses `SEQUENCE` / `READY_SEQUENCE`, with acknowledged call boun
 Upgrade both native and proxy together; mixed versions fail instead of dispatching
 under an unacknowledged protection contract.
 
+## Lock screen with Touch ID — hidden password field (2026-10-31)
+
+With the built-in display active, the macOS 27.2 lock screen offers Touch ID ("Use o Touch ID ou Digite a Senha")
+and hides its password field until a key arrives. The arming Return then only revealed the field
+(`keyPressed: Password view hidden`); no authorization ran, the attempt expired and the call ended in
+`ABORT unlock-or-visible-coverage-timeout` with the Mac still locked. While the attempt is still armed (not consumed
+by the plugin), the coordinator now sends one more Return to the same loginwindow at least 0.5 s after the first
+(`MLShouldRepeatReturn`, contract in `test-attempt.c`). Like the first, it comes from the coordinator's PID, which the
+input guard already exempts. A visible field is submitted by the first Return and consumes the attempt, so no repeat
+follows. Requires reinstalling the native complement (`remove` + `install`, below).
+
 ## Display asleep + locked — accepted and active (2026-09-29)
 
 The regular-use failure `FAILED login-surface-not-observable` occurred before Space

@@ -44,6 +44,37 @@ The new protocol uses `SEQUENCE` / `READY_SEQUENCE`, with acknowledged call boun
 Upgrade both native and proxy together; mixed versions fail instead of dispatching
 under an unacknowledged protection contract.
 
+## Lock screen with Touch ID — hidden password field (2026-10-31)
+
+With the built-in display active, the macOS 27.2 lock screen offers Touch ID ("Use o Touch ID ou Digite a Senha")
+and hides its password field until a key arrives. The arming Return then only revealed the field
+(`keyPressed: Password view hidden`); no authorization ran, the attempt expired and the call ended in
+`ABORT unlock-or-visible-coverage-timeout` with the Mac still locked. While the attempt is still armed (not consumed
+by the plugin), the coordinator now sends one more Return to the same loginwindow at least 0.5 s after the first
+(`MLShouldRepeatReturn`, contract in `test-attempt.c`). Like the first, it comes from the coordinator's PID, which the
+input guard already exempts. A visible field is submitted by the first Return and consumes the attempt, so no repeat
+follows. Requires reinstalling the native complement (`remove` + `install`, below).
+
+Deployed and accepted on 2026-10-31, with the OpenCode server on a Linux machine (OrbStack `dev`) that starts the MCP
+through `mac`. Three pieces:
+
+- Proxy package from this fork (lsof `-w` cleanup fix) in the versioned directory
+  `~/.local/share/mac-lock/proxy/locked-use-wake-lsof-20261031`; the previous directories stay untouched.
+- Native complement rebuilt from this branch in a Mac-disk copy (`~/.local/share/mac-lock/src/…`; flock does not work
+  on the OrbStack mount, so `test_install_native` fails there) and reinstalled with `remove` + `install
+  --persistent-locked-use --controller-app ~/.local/share/opencode-custom-v2/mac-controller/OpenCode Custom
+  Controller.app`. That controller (opencode2 `custom-mac-controller`) carries the same designated requirement as
+  the server, so `controllerRequirement` is unchanged; it also disclaims responsibility, so TCC checks of the
+  coordinator and Guardian see `local.opencode.custom` instead of OrbStack.
+- MCP command: `mac ~/.local/share/opencode-custom-v2/bin/mac-controller node <proxy>/dist/mcp-server.js` with
+  `CODEX_COMPUTER_USE_NATIVE_LOCK=1` (passed through `ORBENV`).
+
+Supervised acceptance (locked, Touch ID lock screen, built-in and external displays): one Finder `get_app_state`
+returned the accessibility tree and a screenshot in 3.6 s. Native log: `DISPLAY_WAKE_READY` → `SPACE_ATTACH` →
+arming Return → `attempt still armed; repeating loginwindow Return` → grant reported with unlock and Guardian
+coverage confirmed → `SPACE_CLEANUP` → `DISPLAY_WAKE_END releaseStatus=0` → `result=CLOSED lockState=1`, no
+suppression marker left.
+
 ## Display asleep + locked — accepted and active (2026-09-29)
 
 The regular-use failure `FAILED login-surface-not-observable` occurred before Space

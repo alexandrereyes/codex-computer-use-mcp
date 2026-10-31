@@ -81,6 +81,10 @@ static void suppress(void) { [@"until-manual-unlock" writeToFile:suppressionPath
             } else if (MLMonotonicTime() - self->_started > 6) [self stop:@"guard-readiness-timeout" failure:YES];
             return;
         }
+        if (MLShouldRepeatReturn(&self->_attempt, MLMonotonicTime(), MLLoginPID())) {
+            fprintf(stderr, "MacLock attempt still armed; repeating loginwindow Return (password field may have been hidden)\n");
+            MLPostReturn(self->_attempt.loginPID);
+        }
         if (!self->_readySent && MLMonotonicTime() - self->_started >= 11) { [self stop:@"unlock-or-visible-coverage-timeout" failure:YES]; return; }
         if (MLBeginRunning(&self->_attempt, MLMonotonicTime(), self->_started + 11, MLLeaseActive(&self->_lease),
             self->_grantReported, MLScreenLockState() == MLLockUnlocked, self->_guardianVisible)) {

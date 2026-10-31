@@ -312,6 +312,18 @@ test("direct broker fails closed on any model-turn notification, including durin
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("an lsof warning about an unrelated mount does not fail cleanup", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "direct-broker-lsof-warning-test."));
+	try {
+		const { script } = await makeFake(root);
+		// macOS lsof: with another user's CoreDevice DeviceFS mounted, it warns on stderr even when it finds nothing.
+		const lsof = path.join(root, "lsof.sh");
+		await writeFile(lsof, `#!/bin/sh\ncase " $* " in *" -w "*) ;; *) echo "lsof: WARNING: can't stat() devicefs file system /Users/other/Library/Developer/CoreDevice/DeviceFS" >&2 ;; esac\nexit 1\n`, { mode: 0o700 });
+		const result = await callOfficialDirectTool("list_apps", {}, { ...options(script), workDirEnumeratorCommand: lsof });
+		assert.equal(result.content[0].text, "direct-ok");
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("partial process enumeration errors fail closed but still kill already discovered descendants", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "direct-broker-enumerator-test."));
 	try {

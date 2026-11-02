@@ -9,7 +9,9 @@ const helper = `
 const fs = require('node:fs');
 const [mode, result] = process.argv.slice(1);
 process.stdin.resume();
-process.stdin.on('end', () => { fs.writeFileSync(result, 'EOF'); process.exit(mode === 'abort' || mode === 'crash' ? 1 : 0); });
+if (mode === 'busy') process.stdout.write('FAILED BUSY_OR_SUPPRESSED\\n', () => process.exit(4));
+if (mode === 'abort-stuck') { console.log('ABORT guardian:FAILED space-attach'); setInterval(() => {}, 1000); }
+process.stdin.on('end', () => { fs.writeFileSync(result, 'EOF'); if (mode !== 'abort-stuck') process.exit(mode === 'abort' || mode === 'crash' ? 1 : 0); });
 process.stdin.on('data', data => {
  for (const byte of data.toString()) {
   fs.appendFileSync(result + '.commands', byte);
@@ -18,7 +20,7 @@ process.stdin.on('data', data => {
   if (byte === 'I' && mode === 'idle') setTimeout(() => { console.log('IDLE_CLOSED'); process.exit(0); }, 20);
  }
 });
-if (mode !== 'pending') console.log(mode === 'legacy' ? 'READY' : 'READY_SEQUENCE');
+if (mode !== 'pending' && mode !== 'busy' && mode !== 'abort-stuck') console.log(mode === 'legacy' ? 'READY' : 'READY_SEQUENCE');
 if (mode === 'abort') setTimeout(() => console.log('ABORT input'), 10);
 if (mode === 'crash') setTimeout(() => process.kill(process.pid, 'SIGKILL'), 10);
 `;
@@ -107,6 +109,23 @@ test("cancellation before native readiness closes startup instead of leaving it 
 		controller.abort();
 		await assert.rejects(started, /cancelled/);
 		assert.equal(await readFile(path.join(root, "result"), "utf8"), "EOF");
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+test("a busy or suppressed refusal explains itself", async () => {
+	await assert.rejects(acquireNativeLease(() => assert.fail("never ready"), undefined,
+		{ command: process.execPath, args: ["-e", helper, "busy", "unused"] }),
+	/FAILED BUSY_OR_SUPPRESSED \(another call is using the Mac, or an earlier failure suspended locked use until someone unlocks the Mac by hand\)/);
+});
+test("a readiness failure without confirmed relock keeps the guard's reason in the message", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "native-stuck."));
+	try {
+		await assert.rejects(acquireNativeLease(() => assert.fail("never ready"), undefined,
+			{ command: process.execPath, args: ["-e", helper, "abort-stuck", path.join(root, "result")] }),
+		(error: Error) => {
+			assert.ok(error instanceof AggregateError);
+			assert.match(error.message, /^Native Computer Use readiness failed and relock was not confirmed: .*ABORT guardian:FAILED space-attach; cleanup: .*relock was not confirmed$/);
+			return true;
+		});
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 test("native helper crash aborts the call and does not confirm relock", async () => {

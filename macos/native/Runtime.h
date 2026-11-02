@@ -8,6 +8,10 @@ extern NSString *const MLExecutable;
 extern NSString *const MLRight;
 NSDictionary *MLReadConfig(void);
 BOOL MLInstallationEnabled(NSDictionary *config, NSTimeInterval now);
+// The suppression marker refuses leases until someone unlocks the Mac by hand. That unlock is spent when the
+// coordinator sees the session unlocked with no lease, or when the marker predates the current boot: the login
+// since then authenticated the user. Times are wall-clock seconds; zero means unknown.
+BOOL MLSuppressionSpent(BOOL leaseActive, BOOL unlocked, double markerTime, double bootTime);
 typedef NS_ENUM(NSInteger, MLLockState) { MLLockUnknown = -1, MLLockUnlocked = 0, MLLockLocked = 1 };
 MLLockState MLSessionLockState(NSDictionary *session);
 MLLockState MLScreenLockState(void);

@@ -3,6 +3,7 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const HELPER = "/Library/Application Support/MacLock/MacLock.app/Contents/MacOS/mac-lock";
+const BUSY_OR_SUPPRESSED_HINT = " (another call is using the Mac, or an earlier failure suspended locked use until someone unlocks the Mac by hand)";
 export interface NativeLease {
 	/** False means the native idle timeout already completed cleanup; acquire a new lease. */
 	begin(): Promise<boolean>;
@@ -56,7 +57,7 @@ export async function acquireNativeLease(
 			waiting.resolve(true);
 		}
 		else if (ready && idle && line === "IDLE_CLOSED" && !failure) idleClosed = true;
-		else fail(`Native Computer Use guard revoked the operation: ${line.slice(0, 160)}`);
+		else fail(`Native Computer Use guard revoked the operation: ${line.slice(0, 160)}${line === "FAILED BUSY_OR_SUPPRESSED" ? BUSY_OR_SUPPRESSED_HINT : ""}`);
 	});
 	child.stdin.on("error", () => {
 		// A begin can race normal idle cleanup. Exit + IDLE_CLOSED decides whether retry is safe.
@@ -119,7 +120,12 @@ export async function acquireNativeLease(
 	catch (error) {
 		try { await finish(); }
 		catch (cleanupError) {
-			if (cleanupError !== error) throw new AggregateError([error, cleanupError], "Native Computer Use readiness failed and relock was not confirmed");
+			if (cleanupError !== error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				const cleanup = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+				throw new AggregateError([error, cleanupError],
+					`Native Computer Use readiness failed and relock was not confirmed: ${reason}; cleanup: ${cleanup}`);
+			}
 		}
 		throw error;
 	}

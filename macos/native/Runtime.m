@@ -38,6 +38,10 @@ BOOL MLInstallationEnabled(NSDictionary *config, NSTimeInterval now) {
     return ![config[@"disabled"] isEqual:@YES] &&
         ([config[@"persistent"] isEqual:@YES] || [config[@"experimentalUntil"] doubleValue] > now);
 }
+BOOL MLSuppressionSpent(BOOL leaseActive, BOOL unlocked, double markerTime, double bootTime) {
+    if (leaseActive) return NO;
+    return unlocked || (markerTime > 0 && bootTime > 0 && markerTime < bootTime);
+}
 MLLockState MLScreenLockState(void) {
     return MLSessionLockState(CFBridgingRelease(CGSessionCopyCurrentDictionary()));
 }

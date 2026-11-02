@@ -38,6 +38,13 @@ int main(int argc, const char *argv[]) {
         assert(!MLInstallationEnabled(disabled, 1000000));
         assert(!MLInstallationEnabled(@{}, 1000000));
         puts("installation: experimental deadline, persistent opt-in and administrative disable passed");
+        assert(MLSuppressionSpent(NO, YES, 2000, 1000)); // Seen unlocked by hand, no lease in progress.
+        assert(!MLSuppressionSpent(NO, NO, 2000, 1000)); // Still locked since the failure: keep refusing.
+        assert(MLSuppressionSpent(NO, NO, 500, 1000)); // Written before this boot: the login since then was manual.
+        assert(!MLSuppressionSpent(YES, YES, 500, 1000)); // Never during a lease, whose own failure may have written it.
+        assert(!MLSuppressionSpent(NO, NO, 0, 1000)); // Unknown marker time.
+        assert(!MLSuppressionSpent(NO, NO, 500, 0)); // Unknown boot time.
+        puts("suppression: manual unlock, still locked, earlier boot, active lease and unknown times passed");
         assert(MLCoverageQualified(MLLockLocked, YES, NO)); // Prepared below secure loginwindow.
         assert(MLCoverageQualified(MLLockLocked, NO, YES)); // UI hid before lock flag changed; overlay already visible.
         assert(!MLCoverageQualified(MLLockLocked, NO, NO)); // Neither source confirms protection.

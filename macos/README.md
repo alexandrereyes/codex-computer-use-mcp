@@ -75,6 +75,36 @@ arming Return → `attempt still armed; repeating loginwindow Return` → grant 
 coverage confirmed → `SPACE_CLEANUP` → `DISPLAY_WAKE_END releaseStatus=0` → `result=CLOSED lockState=1`, no
 suppression marker left.
 
+## Stale suppression marker (2026-11-02)
+
+Two locked calls failed on 2026-10-31, right after the OpenCode server moved back from Linux to the Mac. The coordinator
+still running then had been started through the Linux chain, and both failures left `run/suppressed`. The Mac then
+rebooted, and the user logged in, but no coordinator was running to observe that manual unlock, so the marker survived.
+Two days later, the first call started a fresh coordinator, whose first lease arrived before the timer's first check
+and got `BUSY_OR_SUPPRESSED` even with the Mac unlocked. Had the Mac been locked, as when the user works from the
+iPhone, every locked call would have been refused until someone unlocked the Mac by hand.
+
+The marker still means "refuse leases until someone unlocks the Mac by hand", and the coordinator now treats that
+unlock as already done (`MLSuppressionSpent`, contract in `test-lock-state.m`) in two cases:
+
+- **Seen unlocked with no lease in progress:** what the timer already checked. The check now also runs when a lease
+  arrives, so a fresh coordinator no longer races its first lease.
+- **Written before the current boot (`kern.boottime`):** a coordinator only runs inside a logged-in graphical
+  session, and that login came after the marker. Normally someone typed the password (with FileVault, at the
+  pre-boot screen). A login without the password, such as auto-login, leaves the session unlocked for whoever is at
+  the Mac anyway, so the old marker would no longer protect anything.
+
+A marker written during the current boot still refuses leases while the Mac stays locked. The proxy now explains
+`FAILED BUSY_OR_SUPPRESSED`, and a readiness failure whose relock is not confirmed keeps the guard's reason in its
+message. Before, only `readiness failed and relock was not confirmed` reached the caller.
+
+Back on the Mac, the MCP command is plain `node <proxy>/dist/mcp-server.js` with `CODEX_COMPUTER_USE_NATIVE_LOCK=1`.
+The coordinator's privacy checks are attributed to the server (`OpenCode Custom.app`, `local.opencode.custom`).
+Supervised acceptance with the previous build on 2026-11-02, Mac locked, Touch ID lock screen, built-in and external
+displays: Finder with the display on, the Gmail web app, and Finder with every display asleep (`DISPLAY_WAKE_REQUEST
+… loginUI=0`). Each read took 5.3–5.7 s and ended `result=CLOSED lockState=1` with no marker left. One Gmail
+`get_app_state` through OpenCode's MCP tools took 3.6 s, and the retained lease then closed idle and relocked.
+
 ## Display asleep + locked — accepted and active (2026-09-29)
 
 The regular-use failure `FAILED login-surface-not-observable` occurred before Space
@@ -151,7 +181,8 @@ Suppression is unchanged: existing `run/suppressed` denies the lease before wake
 The old marker cannot distinguish display startup failure from physical input;
 never delete it to force an automatic retry. Clear it through the existing manual
 unlock observation or the explicit remove/install upgrade below. Startup failures
-retain the existing suppression policy.
+retain the existing suppression policy. Since 2026-11-02 a marker older than the
+current boot also counts as cleared (see "Stale suppression marker" above).
 
 The wake upgrade is complete. For a future reinstall, after IDLE, retain the previous
 tarballs, installed proxies and entry backups. Reference commands from the checkout root:

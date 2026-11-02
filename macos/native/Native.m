@@ -7,11 +7,23 @@
 #include <unistd.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <fcntl.h>
 
 static NSString *socketPath(NSString *name) { return [MLInstallRoot stringByAppendingFormat:@"/run/%@.sock", name]; }
 static NSString *suppressionPath(void) { return [MLInstallRoot stringByAppendingPathComponent:@"run/suppressed"]; }
 static void suppress(void) { [@"until-manual-unlock" writeToFile:suppressionPath() atomically:YES encoding:NSUTF8StringEncoding error:NULL]; }
+static double bootTime(void) {
+    struct timeval boot; size_t size = sizeof boot; int name[] = {CTL_KERN, KERN_BOOTTIME};
+    return sysctl(name, 2, &boot, &size, NULL, 0) == 0 && size == sizeof boot ? boot.tv_sec + boot.tv_usec / 1e6 : 0;
+}
+static void clearSpentSuppression(BOOL leaseActive) {
+    struct stat marker;
+    if (lstat(suppressionPath().fileSystemRepresentation, &marker)) return;
+    double written = marker.st_mtimespec.tv_sec + marker.st_mtimespec.tv_nsec / 1e9;
+    if (MLSuppressionSpent(leaseActive, MLScreenLockState() == MLLockUnlocked, written, bootTime()))
+        [NSFileManager.defaultManager removeItemAtPath:suppressionPath() error:NULL];
+}
 
 @interface MLCoordinator : NSObject {
     MLControllerPolicy _policy;
@@ -52,10 +64,7 @@ static void suppress(void) { [@"until-manual-unlock" writeToFile:suppressionPath
     if (SecRequirementCreateWithString((__bridge CFStringRef)config[@"controllerRequirement"], kSecCSDefaultFlags, &_policy.requirement) != errSecSuccess) return nil;
     [NSTimer scheduledTimerWithTimeInterval:0.1 repeats:YES block:^(NSTimer *timer) {
         (void)timer;
-        if (self->_client < 0) {
-            if (MLScreenLockState() == MLLockUnlocked) [NSFileManager.defaultManager removeItemAtPath:suppressionPath() error:NULL];
-            return;
-        }
+        if (self->_client < 0) { clearSpentSuppression(NO); return; }
         if (self->_stopping) return;
         if (!MLInstallationEnabled(self->_configuration, NSDate.date.timeIntervalSince1970)) { [self stop:@"installation-disabled-or-expired" failure:YES]; return; }
         if (!MLGraphicalSessionActive()) { [self stop:@"graphical-session-changed" failure:YES]; return; }
@@ -132,6 +141,8 @@ static void suppress(void) { [@"until-manual-unlock" writeToFile:suppressionPath
     }
 }
 - (void)acceptLease:(int)fd lease:(MLLease)lease {
+    // The first lease of a fresh coordinator arrives before the timer's first check.
+    clearSpentSuppression(_client >= 0);
     if (_disabled || _client >= 0 || !MLLeaseActive(&lease) || !MLGraphicalSessionActive() || [NSFileManager.defaultManager fileExistsAtPath:suppressionPath()]) {
         MLWriteLine(fd, @"BUSY_OR_SUPPRESSED"); close(fd); MLRevokeLease(&lease); return;
     }

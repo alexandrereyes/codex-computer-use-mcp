@@ -105,6 +105,14 @@ displays: Finder with the display on, the Gmail web app, and Finder with every d
 … loginUI=0`). Each read took 5.3–5.7 s and ended `result=CLOSED lockState=1` with no marker left. One Gmail
 `get_app_state` through OpenCode's MCP tools took 3.6 s, and the retained lease then closed idle and relocked.
 
+Deployed the same day: the proxy in `~/.local/share/mac-lock/proxy/locked-use-stale-marker-20261102` (tarball
+SHA-256 `558bbb838d18530463ed2534f23e9a7296d8a676f0faee19b6719dac8a1b3062`; previous entry backed up to
+`~/.local/share/mac-lock/backups/codex-computer-use-before-stale-marker-20261102-151740.json`), and the native
+complement reinstalled with `remove` + `install --persistent-locked-use --controller-app` pointing at the server's
+`OpenCode Custom.app`, run through the macOS administrator dialog instead of Terminal. `controllerRequirement` is
+unchanged. The first lease of the new coordinator came from another agent while a marker written minutes earlier
+existed, with the Mac unlocked, and it was accepted.
+
 ## Display asleep + locked — accepted and active (2026-09-29)
 
 The regular-use failure `FAILED login-surface-not-observable` occurred before Space

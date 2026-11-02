@@ -113,6 +113,11 @@ complement reinstalled with `remove` + `install --persistent-locked-use --contro
 unchanged. The first lease of the new coordinator came from another agent while a marker written minutes earlier
 existed, with the Mac unlocked, and it was accepted.
 
+Supervised acceptance after the reinstall, Mac locked, one Finder `get_app_state` each: with a marker written just
+before, the lease was refused with the explained `FAILED BUSY_OR_SUPPRESSED`, without waking the display, and the
+marker stayed. With a marker dated one hour before boot, the idle coordinator removed it before the call, which then
+ran normally (5.9 s, `result=CLOSED lockState=1`), with no marker left.
+
 ## Display asleep + locked — accepted and active (2026-09-29)
 
 The regular-use failure `FAILED login-surface-not-observable` occurred before Space

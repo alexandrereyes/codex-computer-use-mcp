@@ -20,6 +20,10 @@ and deployment of an installed runtime tarball are separate operations.
 
 - The native coordinator acknowledges `B` at each real call start: **120 seconds
   maximum for that call**. The deadline is not an absolute two-minute session cap.
+  Since the 2026-11-03 upstream sync the proxy times out a protected call after
+  **115 seconds**. Before, its 120-second timeout started after the `B`
+  acknowledgement, so the native deadline came first, and if the coordinator saw it
+  before the proxy's EOF it stopped with a failure and wrote `run/suppressed`.
 - A successful call sends `I`, acknowledged before returning: **30 seconds idle**.
   The curtain remains black between calls. Thirty seconds accommodates the next
   agent/tool round trip without leaving protection held for the lifetime of an MCP.
@@ -43,6 +47,25 @@ and deployment of an installed runtime tarball are separate operations.
 The new protocol uses `SEQUENCE` / `READY_SEQUENCE`, with acknowledged call boundaries.
 Upgrade both native and proxy together; mixed versions fail instead of dispatching
 under an unacknowledged protection contract.
+
+## Upstream v0.6.3 sync (2026-11-03) — local, not deployed
+
+The fork now includes upstream `v0.6.3`. For the complement this changes:
+
+- Closing a session first sends the official `turn-ended` notification to remove the
+  software cursor (best effort, up to about 4 seconds when stalled), then terminates
+  the private processes, then finishes the native lease. A cursor cleanup failure keeps
+  the call's result; a relock or guard failure still fails the close and leaves
+  `brokerCleanupVerified=false`.
+- Cancellation and tool timeouts no longer kill the app-server at once, so the cursor
+  can be cleaned up, but they still end the native lease immediately.
+- A failed close no longer hides the failure before it: the MCP error names the
+  cleanup or relock reason first, then `(original failure: …)`.
+- Status reports `codexPath` / `brokerError` / `configPath` instead of `brokerPath` /
+  `verificationError`. `CODEX_COMPUTER_USE_CODEX_PATH` still wins over `config.json`.
+
+The native source and protocol are unchanged, so the installed native complement needs
+no reinstall; only a new proxy package would be activated.
 
 ## Lock screen with Touch ID — hidden password field (2026-10-31)
 

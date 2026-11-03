@@ -20,6 +20,9 @@ const COMPUTER_USE_PLUGIN_RELATIVE_PATH = "Contents/Resources/plugins/openai-bun
 const COMPUTER_USE_APP_RELATIVE_PATH = "computer-use/Codex Computer Use.app";
 const CLIENT_RELATIVE_PATH = "Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient";
 const OPENAI_TEAM_ID = "2DC432GLL2";
+// The native guard ends an active call 120 s after acknowledging B and treats that deadline as a frozen
+// proxy: failure plus suppression until manual unlock. Time out first, so the lease ends by EOF instead.
+const NATIVE_CALL_TIMEOUT_MS = 115_000;
 
 const jsonObjectSchema = z.record(z.string(), z.json());
 const elicitationRequestSchema = z.object({
@@ -85,6 +88,8 @@ export interface DirectBrokerOptions {
 	workDirEnumeratorCommand?: string;
 	/** Test-only lifecycle transport injection; not exposed by MCP. */
 	nativeLeaseFactory?: typeof acquireNativeLease;
+	/** Test-only override of NATIVE_CALL_TIMEOUT_MS. */
+	nativeCallTimeoutMs?: number;
 	onSpawn?: (pid: number) => void;
 	/** Path configuration file; see `readOfficialPathConfig`. */
 	configPath?: string;
@@ -867,7 +872,9 @@ export async function createOfficialDirectToolSession(
 				const raw = await request("mcpServer/tool/call", {
 					threadId, server: "computer-use", tool: method, arguments: args,
 					_meta: { "x-codex-turn-metadata": { thread_id: threadId, session_id: threadId, turn_id: turnId } },
-				}, callOptions.timeoutMs ?? 120_000);
+				}, nativeCall
+					? Math.min(callOptions.timeoutMs ?? 120_000, options.nativeCallTimeoutMs ?? NATIVE_CALL_TIMEOUT_MS)
+					: callOptions.timeoutMs ?? 120_000);
 				directCalls = 1;
 				if (modelTurnsStarted !== 0) throw new BrokerVerificationError("Model-turn activity was observed during direct dispatch");
 				const result = directResultSchema.parse(raw);

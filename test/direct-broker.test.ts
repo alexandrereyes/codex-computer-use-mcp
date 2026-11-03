@@ -265,6 +265,50 @@ test("a relock failure after a timed-out call names both and stays fail-closed",
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("a protected call times out before the native 120-second call deadline; unprotected calls keep their timeout", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "native-call-deadline."));
+	try {
+		const { script } = await makeFake(root);
+		let finished = 0;
+		const lease = async () => ({ begin: async () => true, idle: async () => {}, finish: async () => { finished++; } });
+		const started = Date.now();
+		await assert.rejects(callOfficialDirectTool("get_app_state", { app: "Safari" }, {
+			...options(script, "hang"), nativeLeaseFactory: lease, nativeCallTimeoutMs: 50, timeoutMs: 60_000,
+		}), /request timed out: mcpServer\/tool\/call/);
+		assert.ok(Date.now() - started < 10_000);
+		assert.equal(finished, 1);
+		const inventory = Date.now();
+		await assert.rejects(callOfficialDirectTool("list_apps", {}, {
+			...options(script, "hang"), nativeLeaseFactory: lease, nativeCallTimeoutMs: 50, timeoutMs: 400,
+		}), /request timed out: mcpServer\/tool\/call/);
+		assert.ok(Date.now() - inventory >= 400);
+		assert.equal(finished, 1);
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("cursor cleanup stays best-effort while native relock stays fail-closed", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "native-cursor-vs-relock."));
+	try {
+		for (const relockFails of [false, true]) {
+			const { script, log } = await makeFake(root);
+			await writeFile(log, "");
+			const lease = async () => ({ begin: async () => true, idle: async () => {},
+				finish: async () => { if (relockFails) throw new Error("Native Computer Use relock was not confirmed"); } });
+			const session = await createOfficialDirectToolSession({ ...options(script, "cleanup-error"), nativeLeaseFactory: lease });
+			assert.equal((await session.call("get_app_state", { app: "Finder" })).isError, false);
+			if (relockFails) await assert.rejects(session.close(), BrokerCleanupError);
+			else await session.close();
+			const oneShot = callOfficialDirectTool("get_app_state", { app: "Finder" }, { ...options(script, "cleanup-error"), nativeLeaseFactory: lease });
+			if (relockFails) {
+				await assert.rejects(oneShot, (error: Error) => error instanceof DirectBrokerCallError && !error.cleanupVerified
+					&& error.message.endsWith("cleanup failed: Native Computer Use relock was not confirmed"));
+			} else assert.equal((await oneShot).brokerCleanupVerified, true);
+			const records = (await readFile(log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+			assert.equal(records.filter((item) => item.method === "command/exec").length, 2, String(relockFails));
+		}
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("one-shot wrapper preserves a setup-phase cleanup failure", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "direct-broker-setup-cleanup-test."));
 	try {

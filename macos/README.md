@@ -302,8 +302,9 @@ npm install --omit=dev --prefix "$HOME/.local/share/mac-lock/proxy/locked-use-co
 The npm package contains native **source**, not prebuilt binaries. Alternatively,
 build/install from its installed `node_modules/codex-computer-use-mcp/macos` directory;
 the complement is self-contained and does not depend on the historical checkout.
-It keeps upstream version `0.5.0`; use the versioned directory and tarball checksum
-to distinguish this fork. Registry/global `npx` commands may run a different package.
+It keeps the upstream version number (`0.5.0` until the 2026-11-03 upstream sync, `0.6.3`
+after it); use the versioned directory and tarball checksum to distinguish this fork.
+Registry/global `npx` commands may run a different package.
 
 Historical continuous-only activation on 2026-09-28: the supervisor updated the existing `codex-computer-use` entry in
 `~/.config/opencode/opencode.json`, changing only `command[1]` to

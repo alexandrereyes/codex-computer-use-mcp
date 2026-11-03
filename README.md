@@ -8,21 +8,21 @@ OpenAI does not produce or endorse this independent project. It relies on an exp
 
 - macOS with an unlocked user session
 - Node.js 22 or newer
-- the official ChatGPT macOS app at `/Applications/ChatGPT.app`
-- the Computer Use component installed by ChatGPT under `~/.codex/computer-use/`
-- Pi 0.80.7 or newer when using the Pi integration
+- the official ChatGPT macOS app, by default at `/Applications/ChatGPT.app`
+- the Computer Use component installed by ChatGPT, by default under `~/.codex/computer-use/`
+- Pi 0.99.0 or newer when using the Pi integration
 
 macOS Screen Recording, Accessibility and TCC controls still apply.
 
-The broker is discovered at `ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`, with fallback to `Contents/Resources/codex` only when the current layout is absent. A configured override takes precedence; failed verification never falls back to another binary. `computer_use_status` reports `brokerPath` on successful verification or `verificationError` on failure.
+Discovery and the `config.json` overrides are described under [Paths](#paths). A present but invalid binary fails verification and never falls back to another one. `computer_use_status` reports `codexPath` on successful verification or `brokerError` on failure.
 
-If the Codex binary bundled with ChatGPT is temporarily incompatible with the installed Computer Use component, set `CODEX_COMPUTER_USE_CODEX_PATH` to the canonical path of a compatible native Codex binary from an official OpenAI installation:
+If the Codex binary bundled with ChatGPT is temporarily incompatible with the installed Computer Use component, set `CODEX_COMPUTER_USE_CODEX_PATH` to the canonical path of a compatible native Codex binary from an official OpenAI installation. It takes precedence over `codexPath` in `config.json` and over discovery:
 
 ```bash
 export CODEX_COMPUTER_USE_CODEX_PATH=/absolute/path/to/codex
 ```
 
-The adapter verifies the selected binary's code signature and OpenAI Team ID before use. It rejects unsigned binaries, binaries signed by another team and symlinked paths.
+The adapter verifies the selected binary's code signature and OpenAI Team ID before use. It rejects unsigned binaries, binaries signed by another team and, for this variable, symlinked or relative paths.
 
 ### Optional native macOS locked-use complement
 
@@ -40,25 +40,24 @@ Install from npm:
 pi install npm:codex-computer-use-mcp
 ```
 
-The extension registers and activates one composable tool:
-
-```text
-computer_use({ code: string })
-```
-
-The code runs with `sky`, `emit`, `emitImage` and a persistent `store` object. `sky` exposes all ten official Computer Use methods, so known sequential actions can run without a model round-trip between each action:
+The extension registers the ten official Computer Use methods as Pi tools named `computer_use_<method>`, such as `computer_use_get_app_state` and `computer_use_click`. They use Pi's `codemode` exposure, so agents call and compose them from Pi's built-in `codemode` tool together with other Pi and MCP tools:
 
 ```js
-const state = await sky.get_app_state({ app: "TextEdit" });
-emit(state.text);
+const state = await tools.computer_use_get_app_state({ app: "TextEdit" });
+text(state.text);
+image(state.screenshot);
 
-await sky.click({ app: "TextEdit", element_index: "7" });
-await sky.type_text({ app: "TextEdit", text: "hello" });
-const next = await sky.get_app_state({ app: "TextEdit" });
-emit(next.text);
+await tools.computer_use_click({ app: "TextEdit", element_index: "7" });
+await tools.computer_use_type_text({ app: "TextEdit", text: "hello" });
+const next = await tools.computer_use_get_app_state({ app: "TextEdit" });
+text(next.text);
 ```
 
-Only values passed to `emit(...)` or `emitImage(...)` are returned to Pi. `list_apps` returns the official text inventory produced by the app-server transport; unlike native `@oai/sky`, that transport does not provide the structured app array. `get_app_state` may return an accessibility-tree diff after the first inspection; pass `disableDiff: true` to request a fresh full tree. Screenshot payloads remain in the parent process and cross the code-worker boundary only as small opaque handles. Code runs in a worker so an unbounded loop can be terminated without freezing Pi; time spent inside an official Computer Use call does not count toward the code execution slice. If a later action fails, Pi still receives earlier emitted observations and the attempted method sequence.
+`element_index` accepts a string or a safe integer for all five methods that use it. Integers are converted to strings before reaching the official tools; string identifiers are preserved exactly. Use indices from the latest app state, because actions can invalidate earlier indices.
+
+The extension does not change which tools are active. Turn on `codemode` with `"defaultTools": ["+codemode"]` in `settings.json` or with `pi --tools +codemode`; Pi also turns it on when an MCP server uses `codemode` exposure. When neither `codemode` nor a Computer Use tool is active, the extension shows one notice at the first prompt.
+
+`computer_use_get_app_state` resolves to `{ app, text, screenshot }`, where `screenshot` is an image block for `image()` or `null`. It may return an accessibility-tree diff after the first inspection; pass `disableDiff: true` to request a fresh full tree. `computer_use_list_apps` resolves to the official text inventory produced by the app-server transport; unlike native `@oai/sky`, that transport does not provide the structured app array. Other methods resolve to their official text output. A failed call rejects with the official error text. Calls run one at a time, and calls after `get_app_state` reuse the signed session until the agent settles. The namespace instructions, available from `describeNamespace("computer_use")`, summarise this workflow.
 
 Use `/computer-use-status` to inspect the installed component and transport status.
 
@@ -115,11 +114,30 @@ Example Pi MCP configuration:
 
 ## Behaviour
 
-The adapter has one mode. Pi exposes the ten official methods through the single `computer_use` code tool; MCP exposes them as ten typed methods. Both are available without wrapper permission prompts. It adds no app allowlist, action gate, intent classifier, selector rewrite or focus policy. App-server uses Codex Full access. The adapter forwards any elicitation that the official host still emits.
+The adapter has one mode. Pi and MCP both expose the ten official methods as typed tools; Pi gives them `codemode` exposure. Both are available without wrapper permission prompts. It adds no app allowlist, action gate, intent classifier, selector rewrite or focus policy. App-server uses Codex Full access. The adapter forwards any elicitation that the official host still emits.
 
 Production calls require verified OpenAI-signed app-server and Computer Use binaries with Team ID `2DC432GLL2`. The adapter uses an isolated, credential-free app-server context. It rejects any model-turn activity. Calls after `get_app_state` reuse the signed session, preserving element identifiers and official app state.
 
+Closing a retained session sends a matching native `turn-ended` notification through the signed app-server before terminating its private processes. This lets the shared Computer Use service remove that session's software cursor without terminating the service. Cancellation and tool timeouts briefly wait for an outstanding native reply before notifying, so a late reply cannot recreate the cursor after cleanup. A stalled request, failed notification, or lost transport can prevent native cleanup. The call still returns its result, because the action already ran, and private process teardown still runs. `brokerCleanupVerified` describes private process cleanup, not visual confirmation that a cursor disappeared.
+
 Audit records contain bounded metadata. They exclude arguments, app content, screenshots, prompts and credentials. MCP and CLI state defaults to `~/.direct-computer-use`. Pi state defaults to `direct-computer-use` under the Pi agent directory. Set `CODEX_COMPUTER_USE_HOME` to override either default.
+
+### Paths
+
+By default the adapter checks `/Applications/ChatGPT.app`, then `~/Applications/ChatGPT.app` in the OS account's home directory. In each bundle it looks for `Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`, then `Contents/Resources/codex` on older ChatGPT builds. It uses the Computer Use app at `~/.codex/computer-use/Codex Computer Use.app`, falling back to the copy bundled in either ChatGPT installation on older builds. It does not use an arbitrary `codex` on `PATH` or the ambient `CODEX_CLI_PATH`.
+
+When ChatGPT is installed elsewhere or moves these files, set either path in `config.json` in the state directory:
+
+```json
+{
+  "codexPath": "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+  "computerUseAppPath": "/Users/me/.codex/computer-use/Codex Computer Use.app"
+}
+```
+
+The adapter reads this file when it starts each Computer Use session, so changes apply without restarting Pi or the MCP server. Configured binaries must pass the same OpenAI signature and Team ID checks. Explicit overrides take precedence: a missing or invalid configured binary never silently falls back to another installation.
+
+If a component is missing, install or update the [official ChatGPT macOS app](https://chatgpt.com/download), open it, and install its Computer Use component. Installing this npm package alone does not install those signed components. The error lists every path checked and the exact config file to edit. Correct `codexPath` / `computerUseAppPath` there, or remove a stale override to restore automatic discovery. For Pi this is normally `~/.pi/agent/direct-computer-use/config.json`; for standalone MCP/CLI it is `~/.direct-computer-use/config.json`. `CODEX_COMPUTER_USE_HOME` overrides the state directory. `/computer-use-status` and `codex-computer-use-mcp --status` show the effective config path and the current error.
 
 Pi limits returned text to 50KB or 2,000 lines. When text exceeds that limit, the complete text is written to a mode-0600 file in a private directory under `/tmp`. Images are returned directly and are never spilled to disk.
 

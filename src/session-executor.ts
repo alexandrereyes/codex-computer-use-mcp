@@ -1,8 +1,10 @@
 import {
 	createOfficialDirectToolSession,
+	pathConfigFile,
 	type OfficialDirectToolSession,
 } from "./direct-broker.ts";
 import {
+	defaultStateRoot,
 	executeDirectTool,
 	type DirectResponse,
 	type DirectServiceDependencies,
@@ -82,6 +84,7 @@ export class DirectSessionExecutor {
 						callTool: async (directMethod, args, options) => {
 							this.session = await (this.dependencies.createSession ?? createOfficialDirectToolSession)({
 								supportsOpenAiFormElicitation: dependencies.supportsOpenAiFormElicitation === true,
+								configPath: pathConfigFile(dependencies.stateRoot ?? defaultStateRoot()),
 							});
 							return this.session.call(directMethod, args, options);
 						},

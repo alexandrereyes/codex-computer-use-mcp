@@ -1,6 +1,6 @@
 {
   "name": "codex-computer-use-mcp",
-  "version": "0.5.0",
+  "version": "0.6.3",
   "description": "Expose the official macOS Computer Use tools directly to Pi and MCP clients without a nested model.",
   "author": "Thomas Mustier",
   "license": "MIT",
@@ -50,29 +50,24 @@
     "check": "npm run lint && tsc -p tsconfig.json --noEmit",
     "pretest": "npm run build",
     "test": "node --test test/*.test.ts",
-    "prepack": "npm run build",
+    "prepare": "npm run build",
     "prepublishOnly": "npm run check && npm run check:pi && npm test",
     "check:pi": "npm run build && npx tsc --ignoreConfig --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --strict --skipLibCheck --types node integrations/pi/index.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "zod": "4.4.3"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-coding-agent": ">=0.99.0"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
       "optional": true
-    },
-    "@earendil-works/pi-tui": {
-      "optional": true
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.80.7",
-    "@earendil-works/pi-tui": "0.80.7",
+    "@earendil-works/pi-coding-agent": "1.2.0",
     "@oxlint/plugins": "1.79.0",
     "@types/node": "24.13.3",
     "oxlint": "1.79.0",

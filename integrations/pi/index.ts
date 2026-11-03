@@ -8,54 +8,70 @@ import {
   getAgentDir,
   truncateHead,
   type ExtensionAPI,
+  type ToolNamespace,
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
 import { z } from "zod";
 import { getDirectStatus } from "../../dist/direct-service.js";
 import {
   type DirectBrokerElicitationRequest,
   type DirectBrokerElicitationResponse,
 } from "../../dist/direct-broker.js";
-import { ComputerUseCodeExecutor } from "../../dist/code-executor.js";
-import { type JsonObject } from "../../dist/tools.js";
+import { DirectSessionExecutor } from "../../dist/session-executor.js";
+import {
+  COMPUTER_USE_METHODS,
+  TOOL_INPUT_SCHEMAS,
+  TOOL_METADATA,
+  type DirectMethod,
+  type JsonObject,
+} from "../../dist/tools.js";
 
 const jsonObjectSchema = z.record(z.string(), z.json());
-const codeParameters = {
+
+export const COMPUTER_USE_NAMESPACE: ToolNamespace = {
+  name: "computer_use",
+  description: "OpenAI's official signed macOS Computer Use. Call get_app_state for an app before acting on it, run known actions in sequence, then call get_app_state again before deciding the next step.",
+  instructions: `Compose these tools in codemode scripts:
+
+const state = await tools.computer_use_get_app_state({ app: "TextEdit" });
+text(state.text);
+image(state.screenshot);
+await tools.computer_use_click({ app: "TextEdit", element_index: "7" });
+await tools.computer_use_type_text({ app: "TextEdit", text: "hello" });
+
+get_app_state resolves to { app, text, screenshot }. text is the accessibility tree; after the first inspection it may be a diff, so pass disableDiff: true for a fresh full tree. screenshot is an image block for image(), or null.
+Take element_index values from the latest get_app_state text, and inspect again after acting.
+Calls run one at a time, in the order the script makes them.
+list_apps resolves to the official text inventory. A failed call rejects with the official error text.`,
+};
+
+export function computerUseToolName(method: DirectMethod): string {
+  return `computer_use_${method}`;
+}
+
+const appStateOutputSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["code"],
+  required: ["app", "text", "screenshot"],
   properties: {
-    code: {
-      type: "string",
-      description: "JavaScript body to execute. Use await sky.<method>(args), emit(value), emitImage(screenshot), and store for state shared across calls.",
+    app: { type: "string" },
+    text: { type: "string", description: "Accessibility tree, or a diff after the first inspection" },
+    screenshot: {
+      anyOf: [
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["type", "data", "mimeType"],
+          properties: {
+            type: { type: "string", const: "image" },
+            data: { type: "string" },
+            mimeType: { type: "string" },
+          },
+        },
+        { type: "null" },
+      ],
     },
   },
 } as const;
-
-const codeDescription = `Run JavaScript that composes OpenAI's official signed macOS Computer Use methods in one call. No nested model is used.
-
-Available globals:
-- sky.list_apps() -> text app inventory
-- sky.get_app_state({ app, disableDiff? }) -> { app, text, screenshot }
-- sky.click({ app, element_index?, x?, y?, mouse_button?, click_count? })
-- sky.perform_secondary_action({ app, element_index, action })
-- sky.set_value({ app, element_index, value })
-- sky.select_text({ app, element_index, text, prefix?, suffix?, selection? })
-- sky.scroll({ app, element_index, direction, pages? })
-- sky.drag({ app, from_x, from_y, to_x, to_y })
-- sky.press_key({ app, key })
-- sky.type_text({ app, text })
-- emit(value) returns text or JSON to Pi
-- emitImage(state.screenshot) returns a screenshot to Pi
-- store is a persistent JSON object shared across calls
-
-get_app_state may return an accessibility-tree diff after the first inspection. Pass disableDiff: true when you need a fresh full tree.
-
-Example:
-const state = await sky.get_app_state({ app: "TextEdit" });
-emit(state.text);
-
-Batch known actions sequentially, then inspect again before deciding the next step.`;
 
 interface PiContentResult {
   content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>;
@@ -160,9 +176,11 @@ export async function handleOfficialElicitation(
   }
 }
 
-export default function directComputerUse(pi: ExtensionAPI) {
+type ComputerUseSession = Pick<DirectSessionExecutor, "execute" | "close">;
+
+export default function directComputerUse(pi: ExtensionAPI, session: ComputerUseSession = new DirectSessionExecutor()) {
   const stateRoot = process.env.CODEX_COMPUTER_USE_HOME || path.join(getAgentDir(), "direct-computer-use");
-  const codeExecutor = new ComputerUseCodeExecutor();
+  const toolNames = COMPUTER_USE_METHODS.map(computerUseToolName);
 
   pi.registerCommand("computer-use-status", {
     description: "Show Computer Use status",
@@ -171,45 +189,67 @@ export default function directComputerUse(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
-    name: "computer_use",
-    label: "Computer Use",
-    description: codeDescription,
-    promptSnippet: "Run composable JavaScript against OpenAI's official signed macOS Computer Use surface",
-    promptGuidelines: [
-      "Use computer_use for macOS app UI work, composing known sequential actions in one JavaScript call and emitting only the state needed for the next decision.",
-    ],
-    // SAFETY: Pi accepts this standard JSON Schema object as a custom-tool parameter schema.
-    parameters: codeParameters as any,
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const { code } = z.object({ code: z.string() }).parse(params);
-      const result = await codeExecutor.execute(code, {
-        stateRoot,
-        signal,
-        supportsOpenAiFormElicitation: true,
-        onElicitation: (request) => handleOfficialElicitation(
-          request,
-          ctx,
-          async (url) => (await pi.exec("/usr/bin/open", ["--", url], { signal, timeout: 15_000 })).code === 0,
-        ),
-      });
-      const rendered = await toPiContent(result.content);
-      const details: JsonObject = { calls: result.calls };
-      if (result.error) details.error = result.error;
-      if (rendered.fullOutputPath) details.fullOutputPath = rendered.fullOutputPath;
-      return { content: rendered.content, details };
-    },
-    renderCall(args, theme) {
-      const parsed = z.object({ code: z.string() }).safeParse(args);
-      const firstLine = parsed.success
-        ? parsed.data.code.split("\n").map((line) => line.trim()).find(Boolean)?.slice(0, 100)
-        : undefined;
-      const label = theme.fg("toolTitle", theme.bold("computer_use"));
-      return new Text(firstLine ? `${label} ${theme.fg("dim", firstLine)}` : label, 0, 0);
-    },
-  });
+  for (const method of COMPUTER_USE_METHODS) {
+    pi.registerTool({
+      name: computerUseToolName(method),
+      label: `Computer Use ${method}`,
+      description: TOOL_METADATA[method].description,
+      // SAFETY: Pi accepts standard JSON Schema objects as custom-tool parameter schemas.
+      parameters: TOOL_INPUT_SCHEMAS[method] as any,
+      // SAFETY: Pi accepts standard JSON Schema objects as custom-tool output schemas.
+      outputSchema: method === "get_app_state" ? appStateOutputSchema as any : undefined,
+      exposure: "codemode",
+      namespace: COMPUTER_USE_NAMESPACE,
+      annotations: TOOL_METADATA[method].annotations,
+      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        const args = jsonObjectSchema.parse(params);
+        const response = await session.execute(method, args, {
+          stateRoot,
+          signal,
+          supportsOpenAiFormElicitation: true,
+          onElicitation: (request) => handleOfficialElicitation(
+            request,
+            ctx,
+            async (url) => (await pi.exec("/usr/bin/open", ["--", url], { signal, timeout: 15_000 })).code === 0,
+          ),
+        });
+        const text = response.content
+          .filter((block) => block.type !== "image")
+          .map((block) => String(block.text ?? ""))
+          .join("\n");
+        if (response.isError) throw new Error(text || "Official Computer Use returned an error");
+        const rendered = await toPiContent(response.content);
+        const details: JsonObject = {};
+        if (rendered.fullOutputPath) details.fullOutputPath = rendered.fullOutputPath;
+        if (method !== "get_app_state") return { content: rendered.content, details };
+        const screenshot = response.content.find((block) => block.type === "image");
+        return {
+          content: rendered.content,
+          details,
+          structuredContent: {
+            app: String(args.app),
+            text,
+            screenshot: screenshot
+              ? { type: "image", data: String(screenshot.data), mimeType: String(screenshot.mimeType) }
+              : null,
+          },
+        };
+      },
+    });
+  }
 
-  pi.on("session_start", () => pi.setActiveTools([...new Set([...pi.getActiveTools(), "computer_use"])]));
-  pi.on("agent_settled", () => codeExecutor.close());
-  pi.on("session_shutdown", () => codeExecutor.close());
+  let reachabilityChecked = false;
+  pi.on("session_start", () => { reachabilityChecked = false; });
+  pi.on("before_agent_start", (_event, ctx) => {
+    if (reachabilityChecked) return;
+    reachabilityChecked = true;
+    const active = pi.getActiveTools();
+    if (active.includes("codemode") || toolNames.some((name) => active.includes(name))) return;
+    ctx.ui.notify(
+      "Computer Use tools are called from codemode, which is not active. Add \"+codemode\" to defaultTools in settings.json, or start Pi with --tools +codemode.",
+      "warning",
+    );
+  });
+  pi.on("agent_settled", () => session.close());
+  pi.on("session_shutdown", () => session.close());
 }

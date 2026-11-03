@@ -6,6 +6,7 @@ import { appendAudit, type AuditRecord } from "./audit.ts";
 import {
 	callOfficialDirectTool,
 	DirectBrokerCallError,
+	pathConfigFile,
 	verifyOfficialDirectBroker,
 	type DirectBrokerElicitationRequest,
 	type DirectBrokerElicitationResponse,
@@ -45,7 +46,7 @@ export interface DirectServiceDependencies {
 	callTool?: typeof callOfficialDirectTool;
 }
 
-function defaultStateRoot(): string {
+export function defaultStateRoot(): string {
 	return process.env.CODEX_COMPUTER_USE_HOME || path.join(homedir(), ".direct-computer-use");
 }
 
@@ -109,6 +110,7 @@ export async function executeDirectTool(raw: JsonValue, deps: DirectServiceDepen
 			timeoutMs: 120_000,
 			onElicitation: deps.onElicitation,
 			supportsOpenAiFormElicitation: deps.supportsOpenAiFormElicitation,
+			configPath: pathConfigFile(stateRoot),
 		});
 		brokerCleanupVerified = broker.brokerCleanupVerified;
 		outcome = broker.isError ? "official_error" : "ok";
@@ -151,32 +153,27 @@ export async function executeDirectTool(raw: JsonValue, deps: DirectServiceDepen
 	};
 }
 
-interface DirectStatus extends JsonObject {
+type DirectStatus = {
 	stateRoot: string;
 	permissionMode: "no-permissions";
-	brokerVerified: boolean;
-	brokerVersion?: string;
-	brokerPath?: string;
-	verificationError?: string;
-	clientBuild?: string;
+	configPath: string;
 	methods: DirectMethod[];
-}
+} & (
+	| { brokerVerified: true; brokerVersion: string; clientBuild: string; codexPath: string }
+	| { brokerVerified: false; brokerError: string }
+);
 
 export function getDirectStatus(stateRoot = defaultStateRoot()): DirectStatus {
-	const status: DirectStatus = {
+	const status = {
 		stateRoot,
-		permissionMode: "no-permissions",
-		brokerVerified: false,
+		configPath: pathConfigFile(stateRoot),
+		permissionMode: "no-permissions" as const,
 		methods: [...COMPUTER_USE_METHODS],
 	};
 	try {
-		const verification = verifyOfficialDirectBroker();
-		status.brokerVerified = true;
-		status.brokerVersion = verification.brokerVersion;
-		status.brokerPath = verification.codexPath;
-		status.clientBuild = verification.clientBuild;
+		const { codexPath, brokerVersion, clientBuild } = verifyOfficialDirectBroker({ configPath: status.configPath });
+		return { ...status, brokerVerified: true, codexPath, brokerVersion, clientBuild };
 	} catch (error) {
-		status.verificationError = error instanceof Error ? error.message : String(error);
+		return { ...status, brokerVerified: false, brokerError: error instanceof Error ? error.message : String(error) };
 	}
-	return status;
 }

@@ -1,6 +1,8 @@
+import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -9,14 +11,14 @@ import type { DirectMethod, DirectToolArguments, JsonObject, JsonValue } from ".
 import { PACKAGE_VERSION } from "./version.ts";
 import { acquireNativeLease, type NativeLease } from "./native-lease.ts";
 
-const DEFAULT_CODEX_PATH = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex";
-const LEGACY_CODEX_PATH = "/Applications/ChatGPT.app/Contents/Resources/codex";
+const CODEX_RELATIVE_PATHS = [
+	"Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+	"Contents/Resources/codex",
+];
 const CODEX_PATH_ENV = "CODEX_COMPUTER_USE_CODEX_PATH";
-const COMPUTER_USE_PLUGIN_ROOT =
-	"/Applications/ChatGPT.app/Contents/Resources/plugins/openai-bundled/plugins/computer-use";
+const COMPUTER_USE_PLUGIN_RELATIVE_PATH = "Contents/Resources/plugins/openai-bundled/plugins/computer-use";
 const COMPUTER_USE_APP_RELATIVE_PATH = "computer-use/Codex Computer Use.app";
 const CLIENT_RELATIVE_PATH = "Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient";
-const COMPUTER_USE_CLIENT_PATH = path.join(os.userInfo().homedir, ".codex", COMPUTER_USE_APP_RELATIVE_PATH, CLIENT_RELATIVE_PATH);
 const OPENAI_TEAM_ID = "2DC432GLL2";
 
 const jsonObjectSchema = z.record(z.string(), z.json());
@@ -75,6 +77,8 @@ export interface DirectBrokerOptions {
 	appServerArgs?: string[];
 	/** Test-only signature bypass. */
 	skipSignatureVerification?: boolean;
+	/** Test-only client fixture, used only with skipSignatureVerification. */
+	computerUseClient?: OfficialComputerUseClient;
 	/** Test-only process-enumerator override. */
 	processEnumeratorCommand?: string;
 	/** Test-only override of the lsof that finds processes in the private working directory. */
@@ -82,6 +86,8 @@ export interface DirectBrokerOptions {
 	/** Test-only lifecycle transport injection; not exposed by MCP. */
 	nativeLeaseFactory?: typeof acquireNativeLease;
 	onSpawn?: (pid: number) => void;
+	/** Path configuration file; see `readOfficialPathConfig`. */
+	configPath?: string;
 }
 
 class BrokerVerificationError extends Error {
@@ -149,7 +155,45 @@ function verifySignedBinary(binaryPath: string, runSync: RunSync): void {
 export interface OfficialComputerUseClient {
 	clientPath: string;
 	appPath: string;
-	layout: "installed-component" | "legacy-plugin-bundle";
+	layout: "installed-component" | "legacy-plugin-bundle" | "configured";
+}
+
+const pathConfigSchema = z.object({
+	codexPath: z.string().min(1).optional(),
+	computerUseAppPath: z.string().min(1).optional(),
+});
+
+export type OfficialPathConfig = z.infer<typeof pathConfigSchema>;
+
+export function pathConfigFile(stateRoot: string): string {
+	return path.join(stateRoot, "config.json");
+}
+
+/** Read optional path overrides. A missing file means the default official locations. */
+export function readOfficialPathConfig(configPath: string): OfficialPathConfig {
+	if (!existsSync(configPath)) return {};
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(readFileSync(configPath, "utf8"));
+	} catch {
+		throw new BrokerVerificationError(`Computer Use config at ${configPath} is not valid JSON`);
+	}
+	const config = pathConfigSchema.safeParse(parsed);
+	if (!config.success) {
+		throw new BrokerVerificationError(`Computer Use config at ${configPath} must set "codexPath" and "computerUseAppPath", when present, to path strings`);
+	}
+	return config.data;
+}
+
+function notFoundError(component: string, checked: string[], key: keyof OfficialPathConfig, hint: string, configPath?: string): BrokerVerificationError {
+	const where = configPath ? `in ${configPath}` : "in the Computer Use config.json in the state directory";
+	return new BrokerVerificationError(
+		`${component} was not found. Checked: ${checked.join(", ")}. ${hint} Then set "${key}" to its absolute path ${where}, or remove "${key}" to restore automatic discovery.`,
+	);
+}
+
+function defaultChatGptAppPaths(userHome = os.userInfo().homedir): string[] {
+	return ["/Applications/ChatGPT.app", path.join(userHome, "Applications", "ChatGPT.app")];
 }
 
 interface ResolveOfficialComputerUseClientOptions {
@@ -157,13 +201,9 @@ interface ResolveOfficialComputerUseClientOptions {
 	userHome?: string;
 	/** Test-only legacy root override. */
 	legacyPluginRoot?: string;
-	runSync?: RunSync;
-}
-
-interface ResolveOfficialCodexAppServerOptions {
-	codexPath?: string;
-	/** Test-only app bundle root override. */
-	resourcesPath?: string;
+	/** Test-only installed ChatGPT app locations override. */
+	chatGptAppPaths?: string[];
+	configPath?: string;
 	runSync?: RunSync;
 }
 
@@ -184,57 +224,95 @@ function checkedCandidate(appPath: string, clientPath: string, layout: OfficialC
 	return { appPath: canonicalApp, clientPath: canonicalClient, layout };
 }
 
-/** Resolve only the two reviewed official layouts, preferring ChatGPT's current installed-component contract. */
+/** Resolve the configured client, or else the two reviewed official layouts, preferring ChatGPT's current installed-component contract. */
 export function resolveOfficialComputerUseClient(options: ResolveOfficialComputerUseClientOptions = {}): OfficialComputerUseClient {
 	const runSync = options.runSync ?? productionRunSync;
+	const config = options.configPath ? readOfficialPathConfig(options.configPath) : {};
+	const clientHint = "Install or update the official ChatGPT macOS app (https://chatgpt.com/download), then open it and install its Computer Use component.";
+	if (config.computerUseAppPath) {
+		const configuredApp = existsSync(config.computerUseAppPath) ? realpathSync(config.computerUseAppPath) : path.resolve(config.computerUseAppPath);
+		const configured = checkedCandidate(configuredApp, path.join(configuredApp, CLIENT_RELATIVE_PATH), "configured", runSync);
+		if (configured) return configured;
+		throw notFoundError("Official Computer Use client", [path.join(configuredApp, CLIENT_RELATIVE_PATH)], "computerUseAppPath", clientHint, options.configPath);
+	}
 	const userHome = options.userHome ?? os.userInfo().homedir;
 	const canonicalUserHome = existsSync(userHome) ? realpathSync(userHome) : path.resolve(userHome);
 	const currentApp = path.join(canonicalUserHome, ".codex", COMPUTER_USE_APP_RELATIVE_PATH);
 	const current = checkedCandidate(currentApp, path.join(currentApp, CLIENT_RELATIVE_PATH), "installed-component", runSync);
 	if (current) return current;
 
-	const legacyRoot = options.legacyPluginRoot ?? COMPUTER_USE_PLUGIN_ROOT;
-	const canonicalLegacyRoot = existsSync(legacyRoot) ? realpathSync(legacyRoot) : path.resolve(legacyRoot);
-	const legacyApp = path.join(canonicalLegacyRoot, "Codex Computer Use.app");
-	const legacy = checkedCandidate(legacyApp, path.join(legacyApp, CLIENT_RELATIVE_PATH), "legacy-plugin-bundle", runSync);
-	if (legacy) return legacy;
-	throw new BrokerVerificationError("Official Computer Use client was not found in a supported location");
+	const checked = [path.join(currentApp, CLIENT_RELATIVE_PATH)];
+	const legacyRoots = options.legacyPluginRoot ? [options.legacyPluginRoot]
+		: (options.chatGptAppPaths ?? defaultChatGptAppPaths(userHome)).map((app) => path.join(app, COMPUTER_USE_PLUGIN_RELATIVE_PATH));
+	for (const legacyRoot of legacyRoots) {
+		const canonicalLegacyRoot = existsSync(legacyRoot) ? realpathSync(legacyRoot) : path.resolve(legacyRoot);
+		const legacyApp = path.join(canonicalLegacyRoot, "Codex Computer Use.app");
+		const clientPath = path.join(legacyApp, CLIENT_RELATIVE_PATH);
+		checked.push(clientPath);
+		const legacy = checkedCandidate(legacyApp, clientPath, "legacy-plugin-bundle", runSync);
+		if (legacy) return legacy;
+	}
+	throw notFoundError(
+		"Official Computer Use client",
+		checked,
+		"computerUseAppPath",
+		clientHint,
+		options.configPath,
+	);
 }
 
-export function resolveOfficialCodexAppServer(options: ResolveOfficialCodexAppServerOptions = {}) {
+/**
+ * Resolve the Codex app-server executable: `CODEX_COMPUTER_USE_CODEX_PATH`, then the configured path,
+ * then the first default ChatGPT location that exists. An override never falls back to another binary.
+ */
+export function resolveOfficialCodex(options: ResolveOfficialComputerUseClientOptions = {}): string {
 	const runSync = options.runSync ?? productionRunSync;
-	const currentPath = options.resourcesPath === undefined ? DEFAULT_CODEX_PATH : path.join(options.resourcesPath, "codex-cli/CodexCLI.app/Contents/MacOS/codex");
-	const legacyPath = options.resourcesPath === undefined ? LEGACY_CODEX_PATH : path.join(options.resourcesPath, "codex");
-	// Only absence permits fallback: a present but invalid current binary must fail verification.
-	const requestedPath = options.codexPath ?? process.env[CODEX_PATH_ENV] ?? (existsSync(currentPath) ? currentPath : legacyPath);
-	let codexPath: string;
-	try {
-		codexPath = realpathSync(requestedPath);
-	} catch {
-		throw new BrokerVerificationError(`Official Codex app-server was not found at ${requestedPath}; checked current/legacy app layouts unless ${CODEX_PATH_ENV} or an explicit path was provided`);
+	const environmentPath = process.env[CODEX_PATH_ENV];
+	if (environmentPath) {
+		let codexPath: string;
+		try {
+			codexPath = realpathSync(environmentPath);
+		} catch {
+			throw new BrokerVerificationError(`Codex app-server was not found at ${environmentPath}, set by ${CODEX_PATH_ENV}. Point it at a compatible OpenAI-signed codex binary, or unset it to use the config file or automatic discovery.`);
+		}
+		if (codexPath !== path.resolve(environmentPath)) {
+			throw new BrokerVerificationError(`${CODEX_PATH_ENV} must be the canonical path of the Codex app-server, not a symlink or relative path`);
+		}
+		verifySignedBinary(codexPath, runSync);
+		return codexPath;
 	}
-	if (codexPath !== path.resolve(requestedPath)) {
-		throw new BrokerVerificationError("Official Codex app-server path was not canonical");
+	const config = options.configPath ? readOfficialPathConfig(options.configPath) : {};
+	const candidates = config.codexPath ? [path.resolve(config.codexPath)]
+		: (options.chatGptAppPaths ?? defaultChatGptAppPaths(options.userHome)).flatMap((app) => CODEX_RELATIVE_PATHS.map((relative) => path.join(app, relative)));
+	const found = candidates.find((candidate) => existsSync(candidate));
+	if (!found) {
+		throw notFoundError(
+			"Codex app-server",
+			candidates,
+			"codexPath",
+			"Install or update the official ChatGPT macOS app (https://chatgpt.com/download), then open it.",
+			options.configPath,
+		);
 	}
+	const codexPath = realpathSync(found);
 	verifySignedBinary(codexPath, runSync);
+	return codexPath;
+}
+
+export function verifyOfficialDirectBroker(options: ResolveOfficialComputerUseClientOptions = {}) {
+	const runSync = options.runSync ?? productionRunSync;
+	const codexPath = resolveOfficialCodex({ ...options, runSync });
+	const client = resolveOfficialComputerUseClient({ ...options, runSync });
 	const version = runSync(codexPath, ["--version"]);
-	const brokerVersion = (version.stdout ?? "").trim();
-	if (version.status !== 0 || !/^codex-cli\s+\d+\./.test(brokerVersion)) {
+	if (version.status !== 0 || !/^codex-cli\s+\d+\./.test((version.stdout ?? "").trim())) {
 		throw new BrokerVerificationError("Could not verify the official Codex app-server version");
 	}
-	return { codexPath, brokerVersion };
-}
-
-export function verifyOfficialDirectBroker(options: ResolveOfficialComputerUseClientOptions & ResolveOfficialCodexAppServerOptions = {}) {
-	const runSync = options.runSync ?? productionRunSync;
-	const appServer = resolveOfficialCodexAppServer({ codexPath: options.codexPath, resourcesPath: options.resourcesPath, runSync });
-	const client = resolveOfficialComputerUseClient({ ...options, runSync });
 	const build = runSync("/usr/bin/plutil", ["-extract", "CFBundleVersion", "raw", path.join(client.appPath, "Contents", "Info.plist")]);
 	const clientBuild = (build.stdout ?? "").trim();
 	if (build.status !== 0 || !clientBuild) {
 		throw new BrokerVerificationError("Could not verify the official Computer Use client build");
 	}
-	return { ...appServer, clientBuild, client };
+	return { brokerVersion: (version.stdout ?? "").trim(), clientBuild, client, codexPath };
 }
 
 function buildBrokerEnv(codexHome: string, tempRoot: string): NodeJS.ProcessEnv {
@@ -256,33 +334,6 @@ function normalizeBrokerError(error: Error, stderr: string): Error {
 	return /authentication|bearer|token/i.test(`${error.message}\n${stderr}`)
 		? new Error("Official direct Computer Use broker reported an authentication failure", { cause: error })
 		: error;
-}
-
-export function buildDirectAppServerArgs(mcpCwd = COMPUTER_USE_PLUGIN_ROOT, clientPath = COMPUTER_USE_CLIENT_PATH): string[] {
-	const mcpTable = `{"computer-use" = { command = ${JSON.stringify(clientPath)}, args = ["mcp"], cwd = ${JSON.stringify(mcpCwd)}, enabled = true, startup_timeout_sec = 30, tool_timeout_sec = 120 }}`;
-	const disabledProvider = '{ name = "Direct dispatch disabled provider", base_url = "http://127.0.0.1:9/v1", wire_api = "responses", request_max_retries = 0, stream_max_retries = 0, supports_websockets = false, requires_openai_auth = false }';
-	return [
-		"-c", 'model_provider="direct_disabled"',
-		"-c", 'model="direct-disabled"',
-		"-c", `model_providers.direct_disabled=${disabledProvider}`,
-		"-c", "features.shell_tool=false",
-		"-c", "features.unified_exec=false",
-		"-c", "features.multi_agent=false",
-		"-c", "features.memories=false",
-		"-c", "memories.use_memories=false",
-		"-c", "memories.generate_memories=false",
-		"-c", "features.remote_plugin=false",
-		"-c", "features.plugins=false",
-		"-c", "features.remote_control=false",
-		"-c", "features.hooks=false",
-		"-c", "analytics.enabled=false",
-		"-c", 'otel.exporter="none"',
-		"-c", 'web_search="disabled"',
-		"-c", 'history.persistence="none"',
-		"-c", `mcp_servers=${mcpTable}`,
-		"-c", "plugins={}",
-		"app-server", "--stdio",
-	];
 }
 
 function processExists(pid: number): boolean {
@@ -463,13 +514,8 @@ export async function createOfficialDirectToolSession(
 	options: DirectBrokerOptions = {},
 ): Promise<OfficialDirectToolSession> {
 	const verification = options.skipSignatureVerification
-		? {
-			brokerVersion: "test-app-server",
-			clientBuild: "test-client",
-			client: undefined,
-			codexPath: options.appServerCommand ?? DEFAULT_CODEX_PATH,
-		}
-		: verifyOfficialDirectBroker();
+		? { brokerVersion: "test-app-server", clientBuild: "test-client", client: options.computerUseClient, codexPath: undefined }
+		: verifyOfficialDirectBroker({ configPath: options.configPath });
 	const tempRoot = await mkdtemp(path.join(os.tmpdir(), "pi-direct-computer-use."));
 	const codexHome = path.join(tempRoot, "codex-home");
 	const workDir = path.join(tempRoot, "work");
@@ -487,6 +533,10 @@ export async function createOfficialDirectToolSession(
 	let modelTurnsStarted = 0;
 	let ephemeralThread = false;
 	let threadId = "";
+	const turnId = randomUUID();
+	let toolCallAttempted = false;
+	let cleanupRequestId: string | undefined;
+	let toolResponse: { id: string; done: Promise<void>; finish(): void } | undefined;
 	let closed = false;
 	let closePromise: Promise<void> | undefined;
 	let callActive = false;
@@ -521,26 +571,51 @@ export async function createOfficialDirectToolSession(
 		void ensureTerminated().catch(() => undefined);
 		void finishNative().catch(() => undefined); // EOF revokes even when failure happens between calls.
 	};
+	const cancel = (error: Error): void => {
+		fatalError ??= error;
+		rejectAll(fatalError);
+		// Cancellation and tool timeouts leave the signed transport usable for cursor cleanup,
+		// but native protection is still revoked at once, as for any other failure.
+		void finishNative().catch(() => undefined);
+		void close().catch(() => undefined);
+	};
 	const send = (message: JsonValue): void => {
 		if (!proc?.stdin.writable) throw new Error("Official app-server stdin is unavailable");
 		proc.stdin.write(`${JSON.stringify(message)}\n`, "utf8");
 	};
-	const request = (methodName: string, params: JsonValue, timeoutMs: number): Promise<JsonValue> => {
+	const request = (methodName: string, params: JsonValue, timeoutMs: number, cleanup = false): Promise<JsonValue> => {
 		const id = String(nextId++);
+		if (cleanup) cleanupRequestId = id;
+		if (methodName === "mcpServer/tool/call") {
+			let finish!: () => void;
+			const done = new Promise<void>((resolve) => { finish = resolve; });
+			toolResponse = { id, done, finish };
+		}
 		return new Promise((resolve, reject) => {
 			const timer = setTimeout(() => {
 				pending.delete(id);
 				const error = new Error(`Official app-server request timed out: ${methodName}`);
 				reject(error);
-				fail(error);
+				if (methodName === "mcpServer/tool/call") cancel(error);
+				// A stalled cursor cleanup must not fail the session; teardown follows.
+				else if (!cleanup) fail(error);
 			}, timeoutMs);
 			pending.set(id, { resolve, reject, timer });
 			try { send({ method: methodName, id, params }); }
 			catch (error) {
 				clearTimeout(timer);
 				pending.delete(id);
+				if (toolResponse?.id === id) { toolResponse.finish(); toolResponse = undefined; }
 				reject(error instanceof Error ? error : new Error(String(error)));
 			}
+		});
+	};
+	const drainToolResponse = (timeoutMs: number): Promise<boolean> => {
+		if (!toolResponse) return Promise.resolve(true);
+		const response = toolResponse;
+		return new Promise((resolve) => {
+			const timer = setTimeout(() => resolve(false), timeoutMs);
+			void response.done.then(() => { clearTimeout(timer); resolve(true); });
 		});
 	};
 
@@ -548,6 +623,41 @@ export async function createOfficialDirectToolSession(
 		closePromise ??= (async () => {
 			closed = true;
 			rejectAll(new Error("Official app-server closed"));
+			const client = verification.client;
+			if (toolCallAttempted && client && !termination) {
+				try {
+					if (!proc?.stdin.writable) throw new Error("Official app-server transport is unavailable before turn cleanup");
+					// A rejected caller is not a completed native request. Ending its
+					// turn too early can let the late request recreate the cursor.
+					if (!await drainToolResponse(1_000)) throw new Error("Native Computer Use request did not settle before teardown");
+					if (termination) throw fatalError ?? new Error("Official app-server transport failed during teardown");
+					let componentHome = path.dirname(path.dirname(client.appPath));
+					if (path.join(componentHome, COMPUTER_USE_APP_RELATIVE_PATH) !== client.appPath) {
+						// Configured apps may live outside the native resolver layout.
+						// Expose the already verified bundle through a private resolver home.
+						componentHome = path.join(tempRoot, "turn-cleanup-home");
+						await mkdir(path.join(componentHome, "computer-use"), { recursive: true, mode: 0o700 });
+						await symlink(client.appPath, path.join(componentHome, COMPUTER_USE_APP_RELATIVE_PATH));
+					}
+					// Use the signed parent's zero-turn command API: a direct Node child
+					// lacks the native sender identity. Only this command needs the real
+					// component location; the broker keeps its isolated CODEX_HOME.
+					const result = z.object({ exitCode: z.number().int() }).parse(await request("command/exec", {
+						command: [client.clientPath, "turn-ended", JSON.stringify({
+							type: "agent-turn-complete", "thread-id": threadId, "turn-id": turnId,
+						})],
+						cwd: workDir,
+						env: { CODEX_HOME: componentHome },
+						sandboxPolicy: { type: "dangerFullAccess" },
+						timeoutMs: 2_000,
+					}, 3_000, true));
+					if (result.exitCode !== 0) throw new Error(`Official turn-ended notification exited with code ${result.exitCode}`);
+				} catch {
+					// Best effort: the native request already ran, so its result stands. Failing
+					// here could make a caller repeat a completed UI action; at worst the shared
+					// service keeps showing this session's cursor.
+				}
+			}
 			let cleanupError: Error | undefined;
 			try {
 				await ensureTerminated();
@@ -572,10 +682,34 @@ export async function createOfficialDirectToolSession(
 
 	try {
 		const command = options.appServerCommand ?? verification.codexPath;
+		if (!command) throw new BrokerVerificationError("The Codex app-server was not verified");
 		let commandArgs = options.appServerArgs;
 		if (!commandArgs) {
-			if (!verification.client) throw new BrokerVerificationError("The official Computer Use client was not verified");
-			commandArgs = buildDirectAppServerArgs(workDir, verification.client.clientPath);
+			assert(verification.client && verification.codexPath, "Test brokers must supply appServerArgs");
+			const mcpTable = `{"computer-use" = { command = ${JSON.stringify(verification.client.clientPath)}, args = ["mcp"], cwd = ${JSON.stringify(workDir)}, enabled = true, startup_timeout_sec = 30, tool_timeout_sec = 120, env = { CODEX_CLI_PATH = ${JSON.stringify(verification.codexPath)} } }}`;
+			const disabledProvider = '{ name = "Direct dispatch disabled provider", base_url = "http://127.0.0.1:9/v1", wire_api = "responses", request_max_retries = 0, stream_max_retries = 0, supports_websockets = false, requires_openai_auth = false }';
+			commandArgs = [
+				"-c", 'model_provider="direct_disabled"',
+				"-c", 'model="direct-disabled"',
+				"-c", `model_providers.direct_disabled=${disabledProvider}`,
+				"-c", "features.shell_tool=false",
+				"-c", "features.unified_exec=false",
+				"-c", "features.multi_agent=false",
+				"-c", "features.memories=false",
+				"-c", "memories.use_memories=false",
+				"-c", "memories.generate_memories=false",
+				"-c", "features.remote_plugin=false",
+				"-c", "features.plugins=false",
+				"-c", "features.remote_control=false",
+				"-c", "features.hooks=false",
+				"-c", "analytics.enabled=false",
+				"-c", 'otel.exporter="none"',
+				"-c", 'web_search="disabled"',
+				"-c", 'history.persistence="none"',
+				"-c", `mcp_servers=${mcpTable}`,
+				"-c", "plugins={}",
+				"app-server", "--stdio",
+			];
 		}
 		proc = spawn(command, commandArgs, {
 			cwd: workDir,
@@ -591,7 +725,7 @@ export async function createOfficialDirectToolSession(
 		proc.stderr.setEncoding("utf8");
 		proc.stderr.on("data", (chunk: string) => { if (stderr.length < 16_384) stderr += chunk.slice(0, 16_384 - stderr.length); });
 		proc.once("error", (error) => fail(error));
-		proc.once("close", (code) => { if (!closed && pending.size > 0) fail(new Error(`Official app-server exited before completing the request (${code ?? "unknown"})`)); });
+		proc.once("close", (code) => { if (pending.size > 0) fail(new Error(`Official app-server exited before completing the request (${code ?? "unknown"})`)); });
 
 		const processProtocolLine = (line: string): void => {
 			let parsedMessage: ReturnType<typeof protocolMessageSchema.safeParse>;
@@ -604,7 +738,13 @@ export async function createOfficialDirectToolSession(
 				fail(new Error("Official app-server unexpectedly emitted model-turn activity during direct dispatch"));
 				return;
 			}
-			if (fatalError) return;
+			if (toolResponse?.id === String(message.id) && (message.result !== undefined || message.error !== undefined)) {
+				toolResponse.finish();
+				toolResponse = undefined;
+			}
+			// After shutdown starts, only its own reply may complete. Continue
+			// detecting malformed output and model activity before this filter.
+			if ((fatalError || closed) && String(message.id) !== cleanupRequestId) return;
 			try {
 				if (message.id != null && (message.result !== undefined || message.error !== undefined)) {
 					const waiter = pending.get(String(message.id));
@@ -670,7 +810,7 @@ export async function createOfficialDirectToolSession(
 			let nativeCall = false;
 			try {
 				if (callOptions.signal) {
-					abortHandler = () => fail(new Error("Direct Computer Use request cancelled"));
+					abortHandler = () => cancel(new Error("Direct Computer Use request cancelled"));
 					if (callOptions.signal.aborted) abortHandler();
 					else callOptions.signal.addEventListener("abort", abortHandler, { once: true });
 				}
@@ -691,7 +831,11 @@ export async function createOfficialDirectToolSession(
 				}
 				if (closed) throw new Error("Official session closed");
 				if (fatalError) throw fatalError;
-				const raw = await request("mcpServer/tool/call", { threadId, server: "computer-use", tool: method, arguments: args }, callOptions.timeoutMs ?? 120_000);
+				toolCallAttempted = true;
+				const raw = await request("mcpServer/tool/call", {
+					threadId, server: "computer-use", tool: method, arguments: args,
+					_meta: { "x-codex-turn-metadata": { thread_id: threadId, session_id: threadId, turn_id: turnId } },
+				}, callOptions.timeoutMs ?? 120_000);
 				directCalls = 1;
 				if (modelTurnsStarted !== 0) throw new BrokerVerificationError("Model-turn activity was observed during direct dispatch");
 				const result = directResultSchema.parse(raw);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { access, cp, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, cp, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -17,7 +17,7 @@ const packOutputSchema = z.union([
 	z.record(z.string(), packReportSchema),
 ]);
 
-test("packed package installs and starts from a plain npm consumer", async () => {
+test("registry and git packages install and start from a plain npm consumer", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "computer-use-package-test."));
 	try {
 		const projectRoot = process.cwd();
@@ -55,23 +55,29 @@ test("packed package installs and starts from a plain npm consumer", async () =>
 		}
 		assert.ok(files.every(file => !file.startsWith("macos/build/") && !file.includes("__pycache__") && !/\.(?:log|png|jpg|jpeg|jsonl)$/.test(file)));
 
-		const consumer = path.join(root, "consumer");
-		await mkdir(consumer);
-		await writeFile(path.join(consumer, "package.json"), '{"private":true}\n');
-		await execFileAsync("npm", ["install", "--no-audit", "--no-fund", path.join(root, report.filename)], { cwd: consumer });
+		await execFileAsync("git", ["init", sourceRoot]);
+		await execFileAsync("git", ["add", "package.json", "package-lock.json", "tsconfig.json", "src", "integrations", "macos", "README.md", "SECURITY.md", "LICENSE"], { cwd: sourceRoot });
+		await execFileAsync("git", ["-c", "user.name=Package test", "-c", "user.email=test@example.invalid", "commit", "-m", "Package fixture"], { cwd: sourceRoot });
 
-		const installedRoot = path.join(consumer, "node_modules", "codex-computer-use-mcp");
-		const installedPackage = JSON.parse(await readFile(path.join(installedRoot, "package.json"), "utf8"));
-		assert.equal(installedPackage.scripts.prepare, undefined);
-		assert.deepEqual(Object.keys(installedPackage.dependencies).sort(), ["@modelcontextprotocol/sdk", "zod"]);
-		await assert.rejects(access(path.join(consumer, "node_modules", "typescript")));
-		await assert.rejects(access(path.join(consumer, "node_modules", "@types", "node")));
+		for (const [name, source] of [
+			["registry", path.join(root, report.filename)],
+			["git", `git+file://${sourceRoot}`],
+		]) {
+			const consumer = path.join(root, name);
+			await mkdir(consumer);
+			await writeFile(path.join(consumer, "package.json"), '{"private":true}\n');
+			await execFileAsync("npm", ["install", "--no-audit", "--no-fund", "--allow-git=all", source], { cwd: consumer });
 
-		const status = await execFileAsync(process.execPath, [path.join(installedRoot, "dist", "mcp-server.js"), "--status"]);
-		assert.equal(JSON.parse(status.stdout).permissionMode, "no-permissions");
-		// The optional native complement must build/test from the installed tarball
-		// without the historical mac-lock checkout. Fixtures only, no GUI or root.
-		await execFileAsync("make", ["-C", path.join(installedRoot, "macos"), "test-native"], { timeout: 60_000 });
+			const installedRoot = path.join(consumer, "node_modules", "codex-computer-use-mcp");
+			await assert.rejects(access(path.join(consumer, "node_modules", "typescript")));
+			await assert.rejects(access(path.join(consumer, "node_modules", "@types", "node")));
+
+			const status = await execFileAsync(process.execPath, [path.join(installedRoot, "dist", "mcp-server.js"), "--status"]);
+			assert.equal(JSON.parse(status.stdout).permissionMode, "no-permissions");
+			// The optional native complement must build/test from either install
+			// without the historical mac-lock checkout. Fixtures only, no GUI or root.
+			await execFileAsync("make", ["-C", path.join(installedRoot, "macos"), "test-native"], { timeout: 60_000 });
+		}
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}

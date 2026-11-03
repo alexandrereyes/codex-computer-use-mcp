@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { z } from "zod";
-import { callOfficialDirectTool, createOfficialDirectToolSession, DirectBrokerCallError } from "../src/direct-broker.ts";
+import { BrokerCleanupError, callOfficialDirectTool, createOfficialDirectToolSession, DirectBrokerCallError } from "../src/direct-broker.ts";
 import packageMetadata from "../package.json" with { type: "json" };
 
 const packageVersion = packageMetadata.version;
@@ -233,6 +233,35 @@ test("official error releases retained protection before returning the error res
 			assert.equal(finished, 1);
 		} finally { await session.close(); }
 		assert.equal(finished, 1);
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a relock failure after a timed-out call names both and stays fail-closed", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "native-relock-after-timeout."));
+	try {
+		const { script } = await makeFake(root);
+		const failingRelock = async () => ({ begin: async () => true, idle: async () => {},
+			finish: async () => { throw new Error("Native Computer Use relock was not confirmed"); } });
+		const timedOut = "Official app-server request timed out: mcpServer/tool/call";
+		const session = await createOfficialDirectToolSession({ ...options(script, "hang"), nativeLeaseFactory: failingRelock });
+		await assert.rejects(session.call("get_app_state", { app: "Safari" }, { timeoutMs: 20 }), (error: Error) => {
+			assert.ok(error instanceof DirectBrokerCallError);
+			assert.equal(error.cleanupVerified, false);
+			assert.equal(error.message, `Native Computer Use relock was not confirmed (original failure: ${timedOut})`);
+			return true;
+		});
+		await assert.rejects(session.close(), (error: Error) => error instanceof BrokerCleanupError
+			&& error.message === "Official direct Computer Use broker cleanup failed: Native Computer Use relock was not confirmed");
+
+		await assert.rejects(callOfficialDirectTool("get_app_state", { app: "Safari" }, {
+			...options(script, "hang"), nativeLeaseFactory: failingRelock, timeoutMs: 20,
+		}), (error: Error) => {
+			assert.ok(error instanceof DirectBrokerCallError);
+			assert.equal(error.cleanupVerified, false);
+			assert.equal(error.message, "Official direct Computer Use broker cleanup failed: "
+				+ `Native Computer Use relock was not confirmed (original failure: ${timedOut})`);
+			return true;
+		});
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
 

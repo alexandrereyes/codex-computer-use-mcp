@@ -1,6 +1,7 @@
 import {
 	createOfficialDirectToolSession,
 	pathConfigFile,
+	withCleanupFailure,
 	type OfficialDirectToolSession,
 } from "./direct-broker.ts";
 import {
@@ -73,8 +74,9 @@ export class DirectSessionExecutor {
 			}
 			this.clearIdleTimer();
 			const session = this.session;
+			let response: DirectResponse;
 			try {
-				const response = await executeDirectTool(
+				response = await executeDirectTool(
 					{ method, arguments: params },
 					session ? {
 						...dependencies,
@@ -90,13 +92,26 @@ export class DirectSessionExecutor {
 						},
 					} : dependencies,
 				);
-				if (response.isError) await this.closeSession();
-				else this.scheduleIdleClose();
-				return response;
 			} catch (error) {
-				await this.closeSession();
+				// A close failure must not replace the call's own failure: report both.
+				try { await this.closeSession(); }
+				catch (closeError) {
+					throw withCleanupFailure(error instanceof Error ? error : new Error(String(error)),
+						closeError instanceof Error ? closeError : new Error(String(closeError)));
+				}
 				throw error;
 			}
+			if (!response.isError) {
+				this.scheduleIdleClose();
+				return response;
+			}
+			try { await this.closeSession(); }
+			catch (closeError) {
+				const officialText = response.content.filter((block) => block.type === "text").map((block) => String(block.text ?? "")).join("\n");
+				throw withCleanupFailure(new Error(officialText || "Official Computer Use returned an error"),
+					closeError instanceof Error ? closeError : new Error(String(closeError)));
+			}
+			return response;
 		});
 	}
 

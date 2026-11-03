@@ -9,7 +9,7 @@ import adapter, {
 	handleOfficialElicitation,
 	toPiContent,
 } from "../integrations/pi/index.ts";
-import type { DirectBrokerResult } from "../src/direct-broker.ts";
+import { BrokerCleanupError, DirectBrokerCallError, type DirectBrokerResult } from "../src/direct-broker.ts";
 import { DirectSessionExecutor } from "../src/session-executor.ts";
 import {
 	COMPUTER_USE_METHODS,
@@ -359,6 +359,37 @@ test("idle expiry closes a retained session", async () => {
 		await executor.execute("get_app_state", { app: "TextEdit" }, { stateRoot: root });
 		await new Promise((resolve) => setTimeout(resolve, 40));
 		assert.equal(sessionsClosed, 1);
+	} finally {
+		await executor.close();
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("a session close failure is reported together with the failure that preceded it", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-direct-close-failure-test."));
+	const relock = new Error("Native Computer Use relock was not confirmed");
+	const executor = new DirectSessionExecutor({
+		createSession: async () => ({
+			async call(method: DirectMethod) {
+				if (method === "set_value") throw new DirectBrokerCallError("Official app-server request timed out: mcpServer/tool/call", false);
+				if (method === "press_key") return { ...brokerResult("Computer Use is not active"), isError: true };
+				return brokerResult("state");
+			},
+			async close() { throw new BrokerCleanupError([relock]); },
+		}),
+	});
+	try {
+		await executor.execute("get_app_state", { app: "Safari" }, { stateRoot: root });
+		await assert.rejects(executor.execute("set_value", { app: "Safari", element_index: "3", value: "x" }, { stateRoot: root }), (error: Error) => {
+			assert.ok(error instanceof DirectBrokerCallError);
+			assert.equal(error.cleanupVerified, false);
+			assert.equal(error.message, "Official direct Computer Use broker cleanup failed: Native Computer Use relock was not confirmed"
+				+ " (original failure: Official app-server request timed out: mcpServer/tool/call)");
+			return true;
+		});
+		await executor.execute("get_app_state", { app: "Safari" }, { stateRoot: root });
+		await assert.rejects(executor.execute("press_key", { app: "Safari", key: "Escape" }, { stateRoot: root }),
+			/: Official direct Computer Use broker cleanup failed: Native Computer Use relock was not confirmed \(original failure: Computer Use is not active\)$/);
 	} finally {
 		await executor.close();
 		await rm(root, { recursive: true, force: true });

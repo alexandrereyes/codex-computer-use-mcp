@@ -130,6 +130,38 @@ export class DirectBrokerCallError extends Error {
 	}
 }
 
+const CLEANUP_FAILED = "Official direct Computer Use broker cleanup failed";
+
+/** Private process teardown or native relock was not confirmed. The message names every reason. */
+export class BrokerCleanupError extends Error {
+	readonly reasons: Error[];
+	constructor(reasons: Error[]) {
+		super(`${CLEANUP_FAILED}: ${reasons.map((reason) => reason.message).join("; ")}`,
+			{ cause: reasons.length === 1 ? reasons[0] : new AggregateError(reasons) });
+		this.name = "BrokerCleanupError";
+		this.reasons = reasons;
+	}
+}
+
+/**
+ * Report a cleanup failure without hiding the failure that preceded it. The cleanup failure leads,
+ * because it decides what is safe next; text the original failure already carries is not repeated.
+ */
+export function cleanupFailureMessage(original: Error, cleanup: Error): string {
+	if (cleanup.message.includes(original.message)) return cleanup.message;
+	if (cleanup instanceof BrokerCleanupError && cleanup.reasons.every((reason) => original.message.includes(reason.message))) {
+		return `${CLEANUP_FAILED}: ${original.message}`;
+	}
+	return `${cleanup.message} (original failure: ${original.message})`;
+}
+
+/** The combined error for a call that failed and whose session then failed to close. */
+export function withCleanupFailure(original: Error, cleanup: Error): DirectBrokerCallError {
+	const message = cleanupFailureMessage(original, cleanup);
+	return new DirectBrokerCallError(message, !(cleanup instanceof BrokerCleanupError), new AggregateError([original, cleanup], message),
+		original instanceof DirectBrokerCallError ? original : {});
+}
+
 interface CommandResult {
 	status: number | null;
 	stdout?: string;
@@ -658,7 +690,7 @@ export async function createOfficialDirectToolSession(
 					// service keeps showing this session's cursor.
 				}
 			}
-			let cleanupError: Error | undefined;
+			const cleanupErrors: Error[] = [];
 			try {
 				await ensureTerminated();
 				if (processClosed) {
@@ -670,11 +702,11 @@ export async function createOfficialDirectToolSession(
 				await new Promise<void>((resolve) => setImmediate(resolve));
 				await rm(tempRoot, { recursive: true, force: true });
 			} catch (error) {
-				cleanupError = error instanceof Error ? error : new Error(String(error));
+				cleanupErrors.push(error instanceof Error ? error : new Error(String(error)));
 			}
 			try { await finishNative(); }
-			catch (error) { cleanupError = error instanceof Error ? error : new Error(String(error)); }
-			if (cleanupError) throw new Error("Official direct Computer Use broker cleanup failed", { cause: cleanupError });
+			catch (error) { cleanupErrors.push(error instanceof Error ? error : new Error(String(error))); }
+			if (cleanupErrors.length > 0) throw new BrokerCleanupError(cleanupErrors);
 			if (fatalError || modelTurnsStarted !== 0) throw fatalError ?? new BrokerVerificationError("Model-turn activity was observed during broker teardown");
 		})();
 		return closePromise;
@@ -788,14 +820,14 @@ export async function createOfficialDirectToolSession(
 		ephemeralThread = true;
 	} catch (error) {
 		const primary = normalizeBrokerError(error instanceof Error ? error : new Error(String(error)), stderr);
+		const evidence = { modelTurnsStarted, ephemeralThread, brokerVersion: verification.brokerVersion, clientBuild: verification.clientBuild };
 		try { await close(); }
 		catch (closeError) {
-			const closeFailure = closeError instanceof Error ? closeError : new Error(String(closeError));
-			if (closeFailure.message === "Official direct Computer Use broker cleanup failed") {
-				throw new DirectBrokerCallError(closeFailure.message, false, primary);
+			if (closeError instanceof BrokerCleanupError) {
+				throw new DirectBrokerCallError(cleanupFailureMessage(primary, closeError), false, new AggregateError([primary, closeError]), evidence);
 			}
 		}
-		throw new DirectBrokerCallError(primary.message, true, primary, { modelTurnsStarted, ephemeralThread, brokerVersion: verification.brokerVersion, clientBuild: verification.clientBuild });
+		throw new DirectBrokerCallError(primary.message, true, primary, evidence);
 	}
 
 	return {
@@ -854,13 +886,16 @@ export async function createOfficialDirectToolSession(
 					brokerCleanupVerified: false,
 				};
 			} catch (error) {
-				let primary = normalizeBrokerError(error instanceof Error ? error : new Error(String(error)), stderr);
+				const original = normalizeBrokerError(error instanceof Error ? error : new Error(String(error)), stderr);
+				let primary = original;
+				let message = original.message;
 				try { await finishNative(); }
 				catch (nativeError) {
 					primary = nativeError instanceof Error ? nativeError : new Error(String(nativeError));
+					message = cleanupFailureMessage(original, primary);
 					fail(primary);
 				}
-				throw new DirectBrokerCallError(primary.message, false, primary, {
+				throw new DirectBrokerCallError(message, false, primary === original ? original : new AggregateError([original, primary], message), {
 					directCalls, modelTurnsStarted, ephemeralThread, elicitationRequests: currentElicitationCount,
 					brokerVersion: verification.brokerVersion, clientBuild: verification.clientBuild,
 				});
@@ -896,10 +931,8 @@ export async function callOfficialDirectTool(
 		}
 	} catch (cleanupError) {
 		const closeFailure = cleanupError instanceof Error ? cleanupError : new Error(String(cleanupError));
-		if (closeFailure.message !== "Official direct Computer Use broker cleanup failed") {
-			throw new DirectBrokerCallError(closeFailure.message, true, closeFailure, failure instanceof DirectBrokerCallError ? failure : {});
-		}
-		throw new DirectBrokerCallError(closeFailure.message, false, closeFailure, failure instanceof DirectBrokerCallError ? failure : {});
+		if (failure) throw withCleanupFailure(failure instanceof Error ? failure : new Error(String(failure)), closeFailure);
+		throw new DirectBrokerCallError(closeFailure.message, !(closeFailure instanceof BrokerCleanupError), closeFailure);
 	}
 	if (failure) {
 		if (failure instanceof DirectBrokerCallError) {

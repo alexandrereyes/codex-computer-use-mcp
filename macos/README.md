@@ -6,6 +6,40 @@ It wraps the **installed, signed OpenAI Computer Use tools**; no proprietary Ope
 binary is redistributed. Without `CODEX_COMPUTER_USE_NATIVE_LOCK=1`, the proxy's
 normal behavior is unchanged. There is no root/postinstall hook.
 
+## Active deployment — upstream v0.6.3, 2026-11-03
+
+The fork's `main` includes upstream v0.6.3 plus the MacLock lifecycle integration,
+combined original/cleanup diagnostics and the protected-call 115-second timeout
+(runtime source commit `8586f31`). No native source, protocol, installer or installed
+helper changed; no native reinstall or OpenCode/Codex restart was needed.
+
+- Installed proxy: `~/.local/share/mac-lock/proxy/locked-use-v0.6.3-8586f31-20261103`.
+  OpenCode's existing MCP entry now points to its `dist/mcp-server.js`, retaining
+  `CODEX_COMPUTER_USE_NATIVE_LOCK=1`; its configuration reload connected the new proxy.
+- Previous entry, mode `0600`:
+  `~/.local/share/mac-lock/backups/codex-computer-use-before-v0.6.3-20261103-141743.json`.
+  Previous versioned installations remain available for rollback.
+- Tarball SHA-256:
+  `7bfeabd34d1d5be36aa2e7253690d7adce8362746f9dba36c8b4eb96baab0af8`.
+- Predeployment checks: 86/86 proxy tests, native contracts and 11 Python tests,
+  lint/type checks, Pi check, package consumers and build passed.
+- Actual unlocked Safari read through OpenCode's reloaded MCP: 1.317 seconds,
+  image plus accessibility tree and zero model turns; native idle cleanup closed
+  normally with no suppression marker.
+- Supervised acceptance after the user manually locked the Mac: the installed
+  proxy read Safari in 3.518 seconds (7.066 seconds including confirmed teardown).
+  Both displays were asleep beforehand. The native log ordered display wake,
+  Space attach, guard/authorization/visible-unlock confirmation, Space cleanup,
+  display-hold release and `result=CLOSED lockState=1`, exactly one cycle.
+  The screenshot was visually checked as useful Safari content, not the curtain;
+  final lock and absence of suppression were confirmed. Private report:
+  `macos/build/locked-use-v0.6.3-8586f31-20261103/acceptance-locked-visual.json`.
+  An earlier harness run rejected the official JPEG because it expected PNG;
+  that run's protection/relock also passed. The corrected harness accepts JPEG.
+
+This validates the deployed lifecycle, not a definitive cure for intermittent
+Safari accessibility stalls. No GitHub push or npm publication was performed.
+
 ## Continuous protection — active local deployment
 
 The proxy now retains one native lease across nearby calls in the same official

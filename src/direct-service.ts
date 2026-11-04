@@ -12,6 +12,7 @@ import {
 	type DirectBrokerElicitationResponse,
 	type DirectBrokerResult,
 } from "./direct-broker.ts";
+import { openTurnsDirectory } from "./open-turns.ts";
 import {
 	COMPUTER_USE_METHODS,
 	validateDirectArguments,
@@ -111,6 +112,7 @@ export async function executeDirectTool(raw: JsonValue, deps: DirectServiceDepen
 			onElicitation: deps.onElicitation,
 			supportsOpenAiFormElicitation: deps.supportsOpenAiFormElicitation,
 			configPath: pathConfigFile(stateRoot),
+			openTurnsDir: openTurnsDirectory(stateRoot),
 		});
 		brokerCleanupVerified = broker.brokerCleanupVerified;
 		outcome = broker.isError ? "official_error" : "ok";

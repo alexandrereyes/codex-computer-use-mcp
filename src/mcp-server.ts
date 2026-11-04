@@ -39,6 +39,21 @@ server.onclose = () => {
 	void sessionExecutor.close().catch(() => { process.exitCode = 1; });
 };
 
+// Stdio clients stop a server by closing stdin, then SIGTERM 2 s later, then SIGKILL 2 s after
+// that. End the retained session's native turn first: that notification is what removes the
+// official software cursor. The wait stays inside that grace, so a call still in flight cannot
+// keep the process alive; a turn left open stays recorded and a later session ends it.
+const SHUTDOWN_TIMEOUT_MS = 3_500;
+let shutdown: Promise<void> | undefined;
+const shutdownAndExit = (): void => {
+	shutdown ??= Promise.race([
+		sessionExecutor.shutdown(),
+		new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_TIMEOUT_MS)),
+	]).then(() => process.exit());
+};
+process.stdin.once("end", shutdownAndExit);
+for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(signal, shutdownAndExit);
+
 const toolDefinitions = COMPUTER_USE_METHODS.map((method) => ({
 	name: method,
 	description: TOOL_METADATA[method].description,

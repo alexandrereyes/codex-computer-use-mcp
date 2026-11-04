@@ -10,6 +10,7 @@ import {
 	type DirectResponse,
 	type DirectServiceDependencies,
 } from "./direct-service.ts";
+import { openTurnsDirectory } from "./open-turns.ts";
 import type { DirectMethod, DirectToolArguments } from "./tools.ts";
 
 interface DirectSessionExecutorDependencies {
@@ -22,6 +23,7 @@ export class DirectSessionExecutor {
 	private session?: OfficialDirectToolSession;
 	private idleTimer?: NodeJS.Timeout;
 	private idleFailure?: Error;
+	private closing?: Promise<void>;
 	private readonly dependencies: DirectSessionExecutorDependencies;
 
 	constructor(dependencies: DirectSessionExecutorDependencies = {}) {
@@ -43,7 +45,11 @@ export class DirectSessionExecutor {
 		this.clearIdleTimer();
 		const session = this.session;
 		this.session = undefined;
-		await session?.close();
+		if (!session) return;
+		const closing = session.close();
+		this.closing = closing;
+		try { await closing; }
+		finally { if (this.closing === closing) this.closing = undefined; }
 	}
 
 	private scheduleIdleClose(): void {
@@ -84,9 +90,11 @@ export class DirectSessionExecutor {
 					} : method === "get_app_state" ? {
 						...dependencies,
 						callTool: async (directMethod, args, options) => {
+							const stateRoot = dependencies.stateRoot ?? defaultStateRoot();
 							this.session = await (this.dependencies.createSession ?? createOfficialDirectToolSession)({
 								supportsOpenAiFormElicitation: dependencies.supportsOpenAiFormElicitation === true,
-								configPath: pathConfigFile(dependencies.stateRoot ?? defaultStateRoot()),
+								configPath: pathConfigFile(stateRoot),
+								openTurnsDir: openTurnsDirectory(stateRoot),
 							});
 							return this.session.call(directMethod, args, options);
 						},
@@ -124,5 +132,17 @@ export class DirectSessionExecutor {
 				throw failure;
 			}
 		});
+	}
+
+	/**
+	 * For process exit, outside the call queue: end the retained session's native turn without the
+	 * verified teardown, or wait for a close already under way. Callers bound the wait.
+	 */
+	async shutdown(): Promise<void> {
+		this.clearIdleTimer();
+		const session = this.session;
+		this.session = undefined;
+		if (session) await (session.shutdown ? session.shutdown() : session.close()).catch(() => undefined);
+		else await this.closing?.catch(() => undefined);
 	}
 }

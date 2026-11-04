@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -53,6 +54,30 @@ test("stdio MCP exposes the Computer Use tools and status", async () => {
 		assert.equal(status.brokerVerified, true);
 	} finally {
 		await client.close().catch(() => undefined);
+		await rm(stateRoot, { recursive: true, force: true });
+	}
+});
+
+test("stdio MCP closes its session and exits on stdin end or a termination signal", async () => {
+	const stateRoot = await mkdtemp(path.join(os.tmpdir(), "direct-computer-use-mcp-exit-test."));
+	try {
+		for (const stop of ["stdin", "SIGTERM", "SIGHUP"] as const) {
+			const child = spawn(process.execPath, [path.resolve("src/mcp-server.ts")], {
+				cwd: process.cwd(),
+				env: { ...stringEnvironment(), CODEX_COMPUTER_USE_HOME: stateRoot },
+				stdio: ["pipe", "pipe", "pipe"],
+			});
+			const exited = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
+			const ready = new Promise<void>((resolve) => child.stdout.once("data", () => resolve()));
+			child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } })}\n`);
+			await ready;
+			const started = Date.now();
+			if (stop === "stdin") child.stdin.end();
+			else child.kill(stop);
+			assert.equal(await exited, 0, stop);
+			assert.ok(Date.now() - started < 5_000, stop);
+		}
+	} finally {
 		await rm(stateRoot, { recursive: true, force: true });
 	}
 });

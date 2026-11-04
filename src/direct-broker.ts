@@ -10,6 +10,7 @@ import { z } from "zod";
 import type { DirectMethod, DirectToolArguments, JsonObject, JsonValue } from "./tools.ts";
 import { PACKAGE_VERSION } from "./version.ts";
 import { acquireNativeLease, type NativeLease } from "./native-lease.ts";
+import { forgetOpenTurn, isRecordableThreadId, recordOpenTurn, releaseOpenTurnSession, staleOpenTurns } from "./open-turns.ts";
 
 const CODEX_RELATIVE_PATHS = [
 	"Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
@@ -93,6 +94,8 @@ export interface DirectBrokerOptions {
 	onSpawn?: (pid: number) => void;
 	/** Path configuration file; see `readOfficialPathConfig`. */
 	configPath?: string;
+	/** Directory of possibly open native turns; see `openTurnsDirectory`. Unset disables the record. */
+	openTurnsDir?: string;
 }
 
 class BrokerVerificationError extends Error {
@@ -545,6 +548,11 @@ export interface OfficialDirectToolSession {
 		options?: Pick<DirectBrokerOptions, "timeoutMs" | "signal" | "onElicitation">,
 	): Promise<DirectBrokerResult>;
 	close(): Promise<void>;
+	/**
+	 * For process exit: end the native turns as `close` does, then kill the private processes at
+	 * once instead of the verified teardown. A turn it cannot end stays recorded for a later session.
+	 */
+	shutdown?(): Promise<void>;
 }
 
 export async function createOfficialDirectToolSession(
@@ -571,11 +579,14 @@ export async function createOfficialDirectToolSession(
 	let ephemeralThread = false;
 	let threadId = "";
 	const turnId = randomUUID();
+	const ownerSession = randomUUID();
+	let turnRecorded = false;
 	let toolCallAttempted = false;
 	let cleanupRequestId: string | undefined;
 	let toolResponse: { id: string; done: Promise<void>; finish(): void } | undefined;
 	let closed = false;
 	let closePromise: Promise<void> | undefined;
+	let shutdownPromise: Promise<void> | undefined;
 	let callActive = false;
 	let nativeLease: NativeLease | undefined;
 	let nativeCleanup: Promise<void> | undefined;
@@ -656,45 +667,103 @@ export async function createOfficialDirectToolSession(
 		});
 	};
 
-	const close = (): Promise<void> => {
-		closePromise ??= (async () => {
+	// Use the signed parent's zero-turn command API: a direct Node child
+	// lacks the native sender identity. Only this command needs the real
+	// component location; the broker keeps its isolated CODEX_HOME.
+	const endNativeTurn = async (
+		client: OfficialComputerUseClient,
+		componentHome: string,
+		turn: { threadId: string; turnId: string },
+	): Promise<void> => {
+		const result = z.object({ exitCode: z.number().int() }).parse(await request("command/exec", {
+			command: [client.clientPath, "turn-ended", JSON.stringify({
+				type: "agent-turn-complete", "thread-id": turn.threadId, "turn-id": turn.turnId,
+			})],
+			cwd: workDir,
+			env: { CODEX_HOME: componentHome },
+			sandboxPolicy: { type: "dangerFullAccess" },
+			timeoutMs: 2_000,
+		}, 3_000, true));
+		if (result.exitCode !== 0) throw new Error(`Official turn-ended notification exited with code ${result.exitCode}`);
+	};
+
+	/** Ends this session's native turn. Returns the resolver home once that worked; never throws. */
+	const endOwnTurn = async (): Promise<string | undefined> => {
+		const client = verification.client;
+		if (!toolCallAttempted || !client || termination) return undefined;
+		try {
+			if (!proc?.stdin.writable) throw new Error("Official app-server transport is unavailable before turn cleanup");
+			// A rejected caller is not a completed native request. Ending its
+			// turn too early can let the late request recreate the cursor.
+			if (!await drainToolResponse(1_000)) throw new Error("Native Computer Use request did not settle before teardown");
+			if (termination) throw fatalError ?? new Error("Official app-server transport failed during teardown");
+			let componentHome = path.dirname(path.dirname(client.appPath));
+			if (path.join(componentHome, COMPUTER_USE_APP_RELATIVE_PATH) !== client.appPath) {
+				// Configured apps may live outside the native resolver layout.
+				// Expose the already verified bundle through a private resolver home.
+				componentHome = path.join(tempRoot, "turn-cleanup-home");
+				await mkdir(path.join(componentHome, "computer-use"), { recursive: true, mode: 0o700 });
+				await symlink(client.appPath, path.join(componentHome, COMPUTER_USE_APP_RELATIVE_PATH));
+			}
+			await endNativeTurn(client, componentHome, { threadId, turnId });
+			if (turnRecorded && options.openTurnsDir) await forgetOpenTurn(options.openTurnsDir, threadId).catch(() => undefined);
+			return componentHome;
+		} catch {
+			// Best effort: the native request already ran, so its result stands. Failing
+			// here could make a caller repeat a completed UI action; at worst the shared
+			// service keeps showing this session's cursor until a later session ends its
+			// recorded turn.
+			return undefined;
+		}
+	};
+
+	/**
+	 * The service hides every cursor only once all turns it has seen have ended, so a session that
+	 * died first keeps them on screen. End those turns too, through a path that has just worked.
+	 */
+	const endStaleTurns = async (componentHome: string): Promise<void> => {
+		const client = verification.client;
+		if (!client || !options.openTurnsDir) return;
+		for (const stale of await staleOpenTurns(options.openTurnsDir).catch(() => [])) {
+			if (termination || !proc?.stdin.writable) return;
+			try {
+				await endNativeTurn(client, componentHome, stale);
+				await forgetOpenTurn(options.openTurnsDir, stale.threadId);
+			} catch { return; }
+		}
+	};
+
+	const shutdown = (): Promise<void> => {
+		shutdownPromise ??= (async () => {
+			if (closePromise) {
+				await closePromise.catch(() => undefined);
+				return;
+			}
 			closed = true;
 			rejectAll(new Error("Official app-server closed"));
-			const client = verification.client;
-			if (toolCallAttempted && client && !termination) {
-				try {
-					if (!proc?.stdin.writable) throw new Error("Official app-server transport is unavailable before turn cleanup");
-					// A rejected caller is not a completed native request. Ending its
-					// turn too early can let the late request recreate the cursor.
-					if (!await drainToolResponse(1_000)) throw new Error("Native Computer Use request did not settle before teardown");
-					if (termination) throw fatalError ?? new Error("Official app-server transport failed during teardown");
-					let componentHome = path.dirname(path.dirname(client.appPath));
-					if (path.join(componentHome, COMPUTER_USE_APP_RELATIVE_PATH) !== client.appPath) {
-						// Configured apps may live outside the native resolver layout.
-						// Expose the already verified bundle through a private resolver home.
-						componentHome = path.join(tempRoot, "turn-cleanup-home");
-						await mkdir(path.join(componentHome, "computer-use"), { recursive: true, mode: 0o700 });
-						await symlink(client.appPath, path.join(componentHome, COMPUTER_USE_APP_RELATIVE_PATH));
-					}
-					// Use the signed parent's zero-turn command API: a direct Node child
-					// lacks the native sender identity. Only this command needs the real
-					// component location; the broker keeps its isolated CODEX_HOME.
-					const result = z.object({ exitCode: z.number().int() }).parse(await request("command/exec", {
-						command: [client.clientPath, "turn-ended", JSON.stringify({
-							type: "agent-turn-complete", "thread-id": threadId, "turn-id": turnId,
-						})],
-						cwd: workDir,
-						env: { CODEX_HOME: componentHome },
-						sandboxPolicy: { type: "dangerFullAccess" },
-						timeoutMs: 2_000,
-					}, 3_000, true));
-					if (result.exitCode !== 0) throw new Error(`Official turn-ended notification exited with code ${result.exitCode}`);
-				} catch {
-					// Best effort: the native request already ran, so its result stands. Failing
-					// here could make a caller repeat a completed UI action; at worst the shared
-					// service keeps showing this session's cursor.
-				}
+			const componentHome = await endOwnTurn();
+			if (componentHome) await endStaleTurns(componentHome);
+			releaseOpenTurnSession(ownerSession);
+			// The process is exiting: kill the private group at once. Freezing it for the verified
+			// teardown could leave it stopped if the caller's SIGKILL lands mid-way.
+			const pid = proc?.pid;
+			if (pid) {
+				try { process.kill(-pid, "SIGKILL"); }
+				catch { try { proc?.kill("SIGKILL"); } catch { /* exited */ } }
 			}
+			await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+		})();
+		return shutdownPromise;
+	};
+
+	const close = (): Promise<void> => {
+		closePromise ??= (async () => {
+			if (shutdownPromise) return await shutdownPromise;
+			closed = true;
+			rejectAll(new Error("Official app-server closed"));
+			const componentHome = await endOwnTurn();
+			if (componentHome) await endStaleTurns(componentHome);
+			releaseOpenTurnSession(ownerSession);
 			const cleanupErrors: Error[] = [];
 			try {
 				await ensureTerminated();
@@ -866,6 +935,12 @@ export async function createOfficialDirectToolSession(
 						}
 					}
 				}
+				if (!turnRecorded && options.openTurnsDir && isRecordableThreadId(threadId)) {
+					turnRecorded = true;
+					await recordOpenTurn(options.openTurnsDir, {
+						threadId, turnId, ownerPid: process.pid, ownerSession, createdAt: Date.now(),
+					}).catch(() => undefined);
+				}
 				if (closed) throw new Error("Official session closed");
 				if (fatalError) throw fatalError;
 				toolCallAttempted = true;
@@ -913,6 +988,7 @@ export async function createOfficialDirectToolSession(
 			}
 		},
 		close,
+		shutdown,
 	};
 }
 

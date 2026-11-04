@@ -365,6 +365,45 @@ test("idle expiry closes a retained session", async () => {
 	}
 });
 
+test("process-exit shutdown ends the retained session without waiting for the call queue", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "pi-direct-shutdown-test."));
+	const events: string[] = [];
+	const openTurnsDirs: Array<string | undefined> = [];
+	let releaseCall!: () => void;
+	const blocked = new Promise<void>((resolve) => { releaseCall = resolve; });
+	const executor = new DirectSessionExecutor({
+		createSession: async (options) => {
+			openTurnsDirs.push(options.openTurnsDir);
+			return {
+				async call(method: DirectMethod) { if (method === "click") await blocked; return brokerResult(method); },
+				async close() { events.push("close"); },
+				async shutdown() { events.push("shutdown"); releaseCall(); },
+			};
+		},
+	});
+	const fallback = new DirectSessionExecutor({
+		createSession: async () => ({
+			async call() { return brokerResult("state"); },
+			async close() { events.push("fallback-close"); },
+		}),
+	});
+	try {
+		await executor.execute("get_app_state", { app: "TextEdit" }, { stateRoot: root });
+		const pending = executor.execute("click", { app: "TextEdit", x: 1, y: 1 }, { stateRoot: root });
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		await executor.shutdown();
+		await pending;
+		await executor.close();
+		await fallback.execute("get_app_state", { app: "TextEdit" }, { stateRoot: root });
+		await fallback.shutdown();
+		assert.deepEqual(events, ["shutdown", "fallback-close"]);
+		assert.deepEqual(openTurnsDirs, [path.join(root, "open-turns")]);
+	} finally {
+		await Promise.all([executor.close(), fallback.close()]);
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("a session close failure is reported together with the failure that preceded it", async () => {
 	const root = await mkdtemp(path.join(os.tmpdir(), "pi-direct-close-failure-test."));
 	const relock = new Error("Native Computer Use relock was not confirmed");

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -650,5 +650,91 @@ test("official tool errors still end the native turn", async () => {
 		assert.equal(result.isError, true);
 		const records = (await readFile(log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
 		assert.equal(records.filter((item) => item.method === "command/exec").length, 1);
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+function exitedPid(): number {
+	const result = spawnSync(process.execPath, ["-e", ""]);
+	assert.ok(result.pid);
+	return result.pid;
+}
+
+function endedTurns(records: Array<{ method?: string; params?: { command?: string[] } }>): Array<{ "thread-id": string; "turn-id": string }> {
+	return records.filter((item) => item.method === "command/exec").map((item) => JSON.parse(item.params!.command![2]));
+}
+
+test("a session records its native turn before the first call and forgets it once the turn ends", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "direct-broker-open-turn-test."));
+	try {
+		const { script, log } = await makeFake(root);
+		const openTurnsDir = path.join(root, "open-turns");
+		const session = await createOfficialDirectToolSession({ ...options(script), openTurnsDir });
+		await assert.rejects(readdir(openTurnsDir), { code: "ENOENT" });
+		await session.call("list_apps", {});
+		const recorded = JSON.parse(await readFile(path.join(openTurnsDir, "thread-test.json"), "utf8"));
+		assert.equal(recorded.ownerPid, process.pid);
+		await session.close();
+		const records = (await readFile(log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+		assert.deepEqual(endedTurns(records), [{ type: "agent-turn-complete", "thread-id": "thread-test", "turn-id": recorded.turnId }]);
+		assert.deepEqual(await readdir(openTurnsDir), []);
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("closing a session also ends the recorded turns of sessions that died before ending theirs", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "direct-broker-stale-turn-test."));
+	try {
+		const { script, log } = await makeFake(root);
+		const openTurnsDir = path.join(root, "open-turns");
+		await mkdir(openTurnsDir);
+		const write = (threadId: string, ownerPid: number) => writeFile(path.join(openTurnsDir, `${threadId}.json`), JSON.stringify({
+			threadId, turnId: `${threadId}-turn`, ownerPid, ownerSession: `${threadId}-session`, createdAt: Date.now(),
+		}));
+		await write("thread-dead", exitedPid());
+		await write("thread-live", process.ppid);
+		await callOfficialDirectTool("list_apps", {}, { ...options(script), openTurnsDir });
+		const records = (await readFile(log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+		const [own, stale, ...rest] = endedTurns(records);
+		assert.equal(own["thread-id"], "thread-test");
+		assert.deepEqual(stale, { type: "agent-turn-complete", "thread-id": "thread-dead", "turn-id": "thread-dead-turn" });
+		assert.deepEqual(rest, []);
+		assert.deepEqual(await readdir(openTurnsDir), ["thread-live.json"]);
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("process-exit shutdown ends the native turn and kills the private process without the verified teardown", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "direct-broker-shutdown-test."));
+	try {
+		const { script, log } = await makeFake(root);
+		const openTurnsDir = path.join(root, "open-turns");
+		let pid = 0;
+		const session = await createOfficialDirectToolSession({ ...options(script), openTurnsDir, onSpawn: (value) => { pid = value; } });
+		await session.call("list_apps", {});
+		await session.shutdown!();
+		await session.close();
+		for (let attempt = 0; attempt < 100; attempt += 1) {
+			try { process.kill(pid, 0); } catch { break; }
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		assert.throws(() => process.kill(pid, 0));
+		const records = (await readFile(log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+		assert.deepEqual(endedTurns(records).map((item) => item["thread-id"]), ["thread-test"]);
+		assert.deepEqual(await readdir(openTurnsDir), []);
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a turn whose notification failed stays recorded and no other turn is ended through that path", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "direct-broker-failed-turn-test."));
+	try {
+		const { script, log } = await makeFake(root);
+		const openTurnsDir = path.join(root, "open-turns");
+		await mkdir(openTurnsDir);
+		await writeFile(path.join(openTurnsDir, "thread-dead.json"), JSON.stringify({
+			threadId: "thread-dead", turnId: "thread-dead-turn", ownerPid: exitedPid(), ownerSession: "dead-session", createdAt: Date.now(),
+		}));
+		const result = await callOfficialDirectTool("list_apps", {}, { ...options(script, "cleanup-error"), openTurnsDir });
+		assert.equal(result.isError, false);
+		const records = (await readFile(log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+		assert.deepEqual(endedTurns(records).map((item) => item["thread-id"]), ["thread-test"]);
+		assert.deepEqual((await readdir(openTurnsDir)).sort(), ["thread-dead.json", "thread-test.json"]);
 	} finally { await rm(root, { recursive: true, force: true }); }
 });

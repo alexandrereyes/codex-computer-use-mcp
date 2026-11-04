@@ -40,6 +40,35 @@ helper changed; no native reinstall or OpenCode/Codex restart was needed.
 This validates the deployed lifecycle, not a definitive cure for intermittent
 Safari accessibility stalls. No GitHub push or npm publication was performed.
 
+## Lingering software cursors (2026-11-04) — branch `fix/cursor-turnos-vazados`
+
+After v0.6.3, cursors still stayed on screen. The ChatGPT app had started the shared
+`SkyComputerUseService` at 13:37 on 2026-11-03, and it outlived every proxy session.
+Observed with Computer Use 1001641 and codex-cli 0.166.0-alpha.5.1:
+
+- The service hides cursors only once **every** turn it has seen has ended. While one
+  session was open, another session's cursor stayed after its own `turn-ended`
+  (exit 0); it vanished when the first session ended.
+- A session killed before its notification left its turn open, and with it every
+  later cursor, while the service kept running. A launchd-started service exits with
+  its last client, which hid the problem in isolated tests.
+- The turn stays endable: a later session sending `turn-ended` for the dead
+  session's thread and turn removed the cursor. A direct child of the shell cannot
+  send it (no signed sender), so it must go through a signed app-server.
+- Calls made by the pre-v0.6.3 proxy on 2026-11-03, between that service start and
+  the deployment, never sent the notification; their turns kept every cursor visible
+  until the service was restarted on 2026-11-04.
+
+The branch records each session's open turn under `<state>/open-turns/`, removes it when
+the notification succeeds, and lets a later close end recorded turns whose owner is gone.
+The MCP server now ends its retained session's turn on stdin end and `SIGTERM`/`SIGINT`/
+`SIGHUP`, then kills its private group at once, within the stdio client's 2 s + 2 s grace.
+MacLock is untouched: a shutdown lease still finishes `result=CLOSED`.
+
+Live check with a long-lived client keeping the service up: SIGTERM after a click exited in
+126 ms with the cursor gone; a SIGKILLed session left its cursor and its record; the next
+session's stdin-end shutdown ended that turn in 249 ms, leaving no cursor and no records.
+
 ## Continuous protection — active local deployment
 
 The proxy now retains one native lease across nearby calls in the same official

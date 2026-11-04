@@ -69,6 +69,24 @@ Live check with a long-lived client keeping the service up: SIGTERM after a clic
 126 ms with the cursor gone; a SIGKILLed session left its cursor and its record; the next
 session's stdin-end shutdown ended that turn in 249 ms, leaving no cursor and no records.
 
+**Deployed 2026-11-04** (proxy only; native helper unchanged, no OpenCode restart):
+
+- Installed proxy: `~/.local/share/mac-lock/proxy/locked-use-v0.6.3-open-turns-a3768d8-20261104`,
+  runtime commit `a3768d8`. OpenCode's MCP entry now points to its `dist/mcp-server.js`,
+  retaining `CODEX_COMPUTER_USE_NATIVE_LOCK=1`; the configuration reload connected it.
+- Previous entry, mode `0600`:
+  `~/.local/share/mac-lock/backups/codex-computer-use-before-open-turns-20261104-141957.json`.
+- Tarball SHA-256: `07e83cb00e4da41b341dd2a4fe7f188180267643caed57bb1550608d0ed90e21`.
+- Checks: 94/96 tests; the two failures (`failed or stalled cursor cleanup`, `drain expiry`)
+  are elapsed-time bounds that `main` fails identically under the host's load at the time
+  (load average above 300, `lsof` taking about 1.5 s). Lint, types, Pi check and build passed.
+- Through OpenCode's reloaded MCP: Finder `get_app_state` + `click` showed the cursor and
+  wrote the record; the 120-second idle close removed both. With MacLock enabled, a
+  shutdown lease finished `result=CLOSED lockState=0` with no suppression marker.
+  Locked use was not re-accepted; its native path is unchanged.
+- Before deploying, `SkyComputerUseService` was terminated once to clear the cursors held
+  by the turns the earlier proxy never ended; launchd relaunched it on the next call.
+
 ## Continuous protection — active local deployment
 
 The proxy now retains one native lease across nearby calls in the same official

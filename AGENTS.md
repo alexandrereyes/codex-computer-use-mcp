@@ -2,6 +2,10 @@
 
 This package is a thin transport adapter to OpenAI's official signed macOS Computer Use tools. The calling agent selects each official method and its arguments. Codex and macOS remain authoritative for tool behaviour, app access and platform permissions.
 
+## Fork
+
+This repository is a fork of `tmustier/codex-computer-use-mcp` with MacLock and other additions. Read `FORK.md` before merging upstream, after the ChatGPT app updates its Codex or Computer Use components, and before deploying. It lists what each merge must preserve, the observed behaviour of the official components, the merge checklist and the deployment steps. Update it whenever one of those changes.
+
 ## Scope
 
 - Preserve all ten official methods and no-permissions behaviour. MCP exposes them as typed tools. Pi registers the same methods as `codemode`-exposure tools, so agents compose them through Pi's built-in `codemode` tool.
